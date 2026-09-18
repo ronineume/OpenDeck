@@ -86,35 +86,70 @@ enum BenchRunner {
             })
         }
 
+        /// A probe deck in its own window, so a programmatic scroll has something
+        /// to scroll.
+        func probeWindow(_ vm: LaunchpadViewModel) -> NSWindow {
+            let root = LaunchpadView(store: store, vm: vm, metrics: metrics, screen: screen)
+            let host = NSHostingView(rootView: root)
+            let window = NSWindow(
+                contentRect: CGRect(x: 0, y: 0, width: 700, height: 460),
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            host.frame = CGRect(x: 0, y: 0, width: 700, height: 460)
+            window.contentView = host
+            window.setFrameOrigin(NSPoint(x: 20, y: 20))
+            window.alphaValue = 0.01
+            window.orderFront(nil)
+            host.layoutSubtreeIfNeeded()
+            return window
+        }
+
+        var scrollFailures = 0
+
         // The swipe path: a programmatic scroll must move the page indicator.
         // This is the wiring the user sees as "the dots do not follow".
         let probe = LaunchpadViewModel(store: store)
-        let probeRoot = LaunchpadView(store: store, vm: probe, metrics: metrics, screen: screen)
-        let probeHost = NSHostingView(rootView: probeRoot)
-        let probeWindow = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 700, height: 460),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        probeHost.frame = CGRect(x: 0, y: 0, width: 700, height: 460)
-        probeWindow.contentView = probeHost
-        probeWindow.setFrameOrigin(NSPoint(x: 20, y: 20))
-        probeWindow.alphaValue = 0.01
-        probeWindow.orderFront(nil)
-        probeHost.layoutSubtreeIfNeeded()
+        let pageWindow = probeWindow(probe)
         RunLoop.main.run(until: Date().addingTimeInterval(0.4))
 
-        var scrollFailures = 0
         for target in [1, 2, 0] where target < pageCount {
             probe.jumper.target = target
             RunLoop.main.run(until: Date().addingTimeInterval(0.9))
             let settled = probe.paging.resolved(count: pageCount)
-            let ok = settled == target
+            // `reportedPage` is the page the **scroll view** last reported, so
+            // asserting it is what proves the grid moved rather than only that
+            // the model was told to.
+            let reported = probe.jumpGuard.reportedPage
+            let ok = settled == target && reported == target
             if !ok { scrollFailures += 1 }
-            print("  \(ok ? "PASS" : "FAIL")  scroll to page \(target) -> indicator reports \(settled)")
+            print("  \(ok ? "PASS" : "FAIL")  scroll to page \(target)"
+                  + " -> indicator \(settled), scroll view reports \(reported)")
         }
-        probeWindow.orderOut(nil)
+        pageWindow.orderOut(nil)
+
+        // The resume path, which the loop above does **not** cover: that loop
+        // publishes its target once the view is already up, so `onChange`
+        // delivers it. The window controller publishes the remembered page
+        // *while* it builds the view, and `onChange` reports changes — a target
+        // that is already set when the grid appears is one it never sees. So the
+        // target is set here before the window exists, exactly as
+        // `LaunchpadWindowController.show` does it.
+        if pageCount > 1 {
+            let resumed = min(2, pageCount - 1)
+            let resumeProbe = LaunchpadViewModel(store: store)
+            resumeProbe.jumper.target = resumed
+            let resumeWindow = probeWindow(resumeProbe)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.9))
+            let settled = resumeProbe.paging.resolved(count: pageCount)
+            let reported = resumeProbe.jumpGuard.reportedPage
+            let ok = settled == resumed && reported == resumed
+            if !ok { scrollFailures += 1 }
+            print("  \(ok ? "PASS" : "FAIL")  resume on page \(resumed)"
+                  + " -> indicator \(settled), scroll view reports \(reported)")
+            resumeWindow.orderOut(nil)
+        }
 
         print("bench: \(reps) iterations, \(pageCount) pages, \(store.apps.count) apps, \(metrics.columns)x\(metrics.rows) grid")
         report("page switch (indicator + jump + selection)", pageSamples)

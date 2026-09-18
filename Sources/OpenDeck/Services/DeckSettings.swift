@@ -1,6 +1,53 @@
 import AppKit
 import ServiceManagement
 
+/// The half of `UserDefaults` this file uses.
+///
+/// A protocol so the self-test can hand `Preferences` a plain dictionary.
+/// Exercising the guard through a real preferences domain would mean inventing a
+/// file in `~/Library/Preferences` in order to assert that nothing is written to
+/// it — the litter the guard exists to stop.
+protocol PreferenceStore: AnyObject {
+    func set(_ value: Any?, forKey key: String)
+    func object(forKey key: String) -> Any?
+    func string(forKey key: String) -> String?
+    func double(forKey key: String) -> Double
+    func bool(forKey key: String) -> Bool
+    func integer(forKey key: String) -> Int
+    func register(defaults: [String: Any])
+}
+
+extension UserDefaults: PreferenceStore {}
+
+/// Preferences with every write dropped while running headless.
+///
+/// The guard sits in front of the store rather than at the call sites: every
+/// property below writes itself back through its `didSet`, and the initialiser
+/// writes too, so twenty-odd scattered conditions would be twenty-odd chances to
+/// miss one. Behind this single point a headless process cannot write a
+/// preference even by accident — the same guarantee `DeckStore` gets from being
+/// handed an explicit `storeURL`.
+///
+/// Reads are deliberately **not** gated: `--snapshot` renders the real settings,
+/// and gating reads would make the picture it produces a lie. `register` is not
+/// gated either — a registration is in-memory only, and the reads depend on it.
+struct Preferences {
+    let persists: Bool
+    let store: PreferenceStore
+
+    func set(_ value: Any?, forKey key: String) {
+        guard persists else { return }
+        store.set(value, forKey: key)
+    }
+
+    func object(forKey key: String) -> Any? { store.object(forKey: key) }
+    func string(forKey key: String) -> String? { store.string(forKey: key) }
+    func double(forKey key: String) -> Double { store.double(forKey: key) }
+    func bool(forKey key: String) -> Bool { store.bool(forKey: key) }
+    func integer(forKey key: String) -> Int { store.integer(forKey: key) }
+    func register(defaults: [String: Any]) { store.register(defaults: defaults) }
+}
+
 /// App-level preferences, persisted in UserDefaults.
 ///
 /// Layout (pages, folders, sort) lives in `DeckStore`; this holds everything
@@ -27,7 +74,20 @@ final class DeckSettings: ObservableObject {
         static let startAtLogin = "startAtLogin"
     }
 
-    private let defaults = UserDefaults.standard
+    /// Named `defaults` on purpose: every existing call site reads exactly as it
+    /// did, so none of them can have bypassed the guard by being missed.
+    private let defaults = Preferences(
+        persists: !AppEnvironment.isHeadless,
+        store: UserDefaults.standard
+    )
+
+    /// Whether this process may change state that outlives it.
+    ///
+    /// One predicate for both the preferences domain and the login item, so a
+    /// later edit cannot gate one of the two and forget the other. Checked by the
+    /// self-test, which is what proves `AppEnvironment.isHeadless` really reaches
+    /// this object rather than merely being set.
+    var mayPersist: Bool { defaults.persists }
 
     /// What sits behind the grid.
     @Published var backdropMode: BackdropMode {
@@ -180,6 +240,11 @@ final class DeckSettings: ObservableObject {
     }
 
     private func applyStartAtLogin() {
+        // `init` assigns `startAtLogin` like any other property, so a headless
+        // run reaches this and calls `SMAppService` — registering or
+        // unregistering a login item. That is a real change to the user's system,
+        // and a self-test has no business making one.
+        guard mayPersist else { return }
         do {
             if startAtLogin {
                 try SMAppService.mainApp.register()

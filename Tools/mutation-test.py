@@ -130,6 +130,72 @@ MUTATIONS = [
         "        for key in keys {",
         "revert the current-domain term: a preference the user has already set is overwritten",
     ),
+    (
+        "M15-headless-run-writes-preferences",
+        "DeckSettings.swift",
+        "        guard persists else { return }\n"
+        "        store.set(value, forKey: key)",
+        "        store.set(value, forKey: key)  // MUTATION: a tool writes like a real launch",
+        "remove the headless guard: --selftest stamps the built-in defaults into the real domain",
+    ),
+    (
+        "M16-jump-in-flight-is-not-arbitrated",
+        "PagingState.swift",
+        "        guard let target = inFlight else { return page != requested }\n"
+        "        guard page == target else { return false }\n"
+        "        inFlight = nil\n"
+        "        return false",
+        "        return page != requested  // MUTATION: ignore a jump in flight",
+        "revert the guard: a jump adopts the page it is leaving, and persists it",
+    ),
+    (
+        "M17-arm-with-nowhere-to-go",
+        "PagingState.swift",
+        "        guard page != reportedPage else {\n"
+        "            inFlight = nil\n"
+        "            return false\n"
+        "        }",
+        "        // MUTATION: arm even when the scroll view has nowhere to go",
+        "revert the no-movement term: a guard nothing ever clears swallows the next scroll",
+    ),
+    (
+        "M18-a-landed-jump-keeps-claiming",
+        "PagingState.swift",
+        "        guard page == target else { return false }\n"
+        "        inFlight = nil\n"
+        "        return false",
+        "        guard page == target else { return false }\n"
+        "        return false  // MUTATION: a landed jump keeps claiming reports",
+        "revert the release: the guard never lets go of a jump that has arrived",
+    ),
+    (
+        "M19-drag-cannot-cancel-a-jump",
+        "PagingState.swift",
+        "    func disarm() { inFlight = nil }",
+        "    func disarm() { }  // MUTATION: a jump never gives up its claim",
+        "revert the drag override: a finger no longer outranks an animation in flight",
+    ),
+    (
+        "M20-a-reused-guard-keeps-its-jump",
+        "PagingState.swift",
+        "    func reset() {\n"
+        "        reportedPage = 0\n"
+        "        inFlight = nil\n"
+        "    }",
+        "    func reset() {\n"
+        "        // MUTATION: a guard reused by a new grid keeps the old jump\n"
+        "    }",
+        "revert the reset: a rebuilt grid inherits the previous window's pending jump",
+    ),
+    (
+        "M21-tools-are-not-marked-headless",
+        "main.swift",
+        '    AppEnvironment.isHeadless = CommandLine.arguments.contains {\n'
+        '        ["--selftest", "--bench", "--snapshot"].contains($0)\n'
+        '    }',
+        '    AppEnvironment.isHeadless = false  // MUTATION: nothing is headless',
+        "revert the wiring: the guard exists but no run ever turns it on",
+    ),
 ]
 
 

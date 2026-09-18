@@ -3,8 +3,9 @@ import Foundation
 
 /// Headless verification of the logic that cannot be eyeballed in a screenshot.
 ///
-/// Run with `OpenDeck --selftest`. Uses a throwaway layout file so the real
-/// one is never touched, and never deletes anything on disk.
+/// Run with `OpenDeck --selftest`. Uses a throwaway layout file and a
+/// `Preferences` that drops writes, so neither the real layout nor the real
+/// preferences are touched, and it never deletes anything on disk.
 @MainActor
 enum SelfTest {
     private static var failures = 0
@@ -815,6 +816,57 @@ enum SelfTest {
               derived.resolved(count: 3) == 2, "\(derived.resolved(count: 3))")
         check("a regrown page count restores the original intent (L8)",
               derived.resolved(count: 5) == 4)
+
+        // Resuming the page the user left off on (Settings → "Resume where I left
+        // off"). The jump is published while the window controller builds the
+        // view, so the grid's first report still names the page it is *leaving*.
+        // Adopting that report overwrote the jump and wrote the wrong page to
+        // preferences on every launch.
+        section("Page jump arbitration (resume-last-page regression)")
+
+        let quiet = PageJumpGuard()
+        check("with no jump in flight, a report naming the page we believe in changes nothing",
+              quiet.observe(reported: 0, requested: 0) == false)
+        check("with no jump in flight, a report naming another page is the user's",
+              quiet.observe(reported: 0, requested: 3) == true)
+
+        // The exact shape of the bug: a jump to page 2 is published before the
+        // grid exists, so the first report is still page 0.
+        let resume = PageJumpGuard()
+        check("a jump arms because the scroll view has to move", resume.arm(2))
+        check("the page a jump is leaving is not adopted as the user's choice",
+              resume.observe(reported: 0, requested: 2) == false)
+        check("a page the jump passes through is not adopted either",
+              resume.observe(reported: 1, requested: 2) == false)
+        check("the report that lands the jump changes nothing (nothing is left to change)",
+              resume.observe(reported: 2, requested: 2) == false)
+        check("a landed jump stops claiming reports", resume.inFlight == nil)
+        check("after the jump, a scroll is the user's again",
+              resume.observe(reported: 3, requested: 2) == true)
+
+        // A guard nothing ever clears would swallow the user's next scroll, so a
+        // jump to the page the scroll view is already on must not arm at all.
+        let idle = PageJumpGuard()
+        check("a jump to the page already on screen does not arm", idle.arm(0) == false)
+        check("...so the very next scroll is still the user's",
+              idle.observe(reported: 1, requested: 0) == true)
+
+        // A finger outranks an animation in flight. Without this, a jump
+        // interrupted by a drag would keep swallowing reports until the page it
+        // wanted appeared — which, once the user has dragged elsewhere, is never.
+        let interrupted = PageJumpGuard()
+        _ = interrupted.arm(3)
+        interrupted.disarm()
+        check("a drag cancels the claim a jump in flight had",
+              interrupted.observe(reported: 1, requested: 3) == true)
+
+        let reused = PageJumpGuard()
+        _ = reused.arm(4)
+        reused.reset()
+        check("a guard reaching a newly built grid carries no jump",
+              reused.inFlight == nil && reused.reportedPage == 0)
+        check("...and its first report is judged on its own merits",
+              reused.observe(reported: 0, requested: 0) == false)
 
         section("Paging SSOT — deferred reclamation & drop revive (review #11)")
         let ssotURL = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -1751,7 +1803,69 @@ enum SelfTest {
         check("keys the legacy domain does not carry are not invented",
               StateHandover.preferencesToAdopt(from: ["hotKeyCode": 49], current: [:]).count == 1)
 
+        // A development tool must not touch live user state. `DeckSettings` writes
+        // every property back through its `didSet` and its initialiser writes too,
+        // and this self-test constructs it. Before the guard went in, a
+        // `--selftest` run moved the user's real preferences plist while the app
+        // was not even running.
+        section("Headless preferences (a tool must not write live state)")
+
+        let memory = MemoryPreferences()
+        let headless = Preferences(persists: false, store: memory)
+        headless.set(49, forKey: "hotKeyCode")
+        headless.set(true, forKey: "showLabels")
+        check("a headless run writes no preference at all",
+              memory.object(forKey: "hotKeyCode") == nil
+              && memory.object(forKey: "showLabels") == nil)
+
+        // The other half of the same rule, and what keeps the check above from
+        // passing against a store that simply drops everything: an ordinary
+        // launch must still persist.
+        let live = Preferences(persists: true, store: memory)
+        live.set(49, forKey: "hotKeyCode")
+        check("a real launch still writes its preferences",
+              memory.object(forKey: "hotKeyCode") as? Int == 49)
+
+        // Reads are deliberately not gated, or `--snapshot` would render invented
+        // settings rather than the user's.
+        live.set(true, forKey: "showLabels")
+        headless.register(defaults: ["dimStrength": 0.18, "resumeLastPage": true])
+        check("a headless run still reads the settings that are there",
+              headless.bool(forKey: "showLabels") && headless.integer(forKey: "hotKeyCode") == 49)
+        check("a headless run still sees the registered defaults",
+              headless.bool(forKey: "resumeLastPage")
+              && headless.double(forKey: "dimStrength") == 0.18)
+
+        // The flag has to actually *reach* the settings object rather than merely
+        // being set somewhere: the store inside `DeckSettings.shared` was built
+        // from it. This is the check that would notice a `main.swift` which
+        // stopped setting it, and the login-item guard in `applyStartAtLogin`
+        // reads the same predicate, so both paths rest on this one value.
+        check("a headless run may not change persistent state",
+              DeckSettings.shared.mayPersist == false)
+
         print("\n\(checks - failures)/\(checks) checks passed, \(failures) failed")
         return failures == 0 ? 0 : 1
+    }
+}
+
+/// A `PreferenceStore` that keeps everything in memory.
+///
+/// So the headless guard can be exercised without creating a preferences domain:
+/// asserting "nothing was written" against a real domain would mean inventing
+/// precisely the file the guard exists to prevent.
+private final class MemoryPreferences: PreferenceStore {
+    private var values: [String: Any] = [:]
+    private var registered: [String: Any] = [:]
+
+    func set(_ value: Any?, forKey key: String) { values[key] = value }
+    func object(forKey key: String) -> Any? { values[key] ?? registered[key] }
+    func string(forKey key: String) -> String? { object(forKey: key) as? String }
+    func double(forKey key: String) -> Double { (object(forKey: key) as? Double) ?? 0 }
+    func bool(forKey key: String) -> Bool { (object(forKey: key) as? Bool) ?? false }
+    func integer(forKey key: String) -> Int { (object(forKey: key) as? Int) ?? 0 }
+
+    func register(defaults: [String: Any]) {
+        for (key, value) in defaults where registered[key] == nil { registered[key] = value }
     }
 }

@@ -18,7 +18,8 @@ one `swiftc` invocation, no Xcode project, no SwiftPM, no third-party packages.
 ```
 
 `--selftest` is the project's safety net: it runs headless, uses a throwaway layout
-file, and never touches your real `~/Library/Application Support/OpenDeck/layout.json`.
+file, writes no preferences, and never touches your real
+`~/Library/Application Support/OpenDeck/layout.json` or your real preferences domain.
 Please run it before opening a PR, and keep it green.
 
 Two more harnesses are available while working:
@@ -27,7 +28,8 @@ Two more harnesses are available while working:
 # offscreen render — no Screen Recording permission needed
 ./build/OpenDeck.app/Contents/MacOS/OpenDeck --snapshot /tmp/deck.png
 
-# page-switch timing, and a regression check that the page dots follow the scroll
+# page-switch timing, plus two regression probes: that the page dots follow the
+# scroll, and that a remembered page is restored while the deck is being built
 ./build/OpenDeck.app/Contents/MacOS/OpenDeck --bench 60
 ```
 
@@ -63,6 +65,14 @@ Anchors must be unique within the file they patch; a drifted anchor is reported 
   guarantee, and it covers more than `save()`: `--bench` and `--snapshot` must not even
   carry state over. Any new call site that builds a store without an explicit `storeURL`
   is a call site that can write into a real user's Application Support folder.
+- **Headless runs write nothing.** `--selftest`, `--bench` and `--snapshot` set
+  `AppEnvironment.isHeadless` before anything reads `DeckSettings.shared`, and
+  `DeckSettings` then builds its store with `persists: false`
+  (`Services/DeckSettings.swift`). Every property there writes itself back through its
+  `didSet` and the initialiser writes too, so a guard placed at the call sites is a guard
+  someone will forget; keep it in front of the store instead. Reads stay allowed on
+  purpose — `--snapshot` renders the real settings, and gating reads would make its
+  picture a lie.
 - **The pre-rename identity lives in exactly one place.** `StateHandover`
   (`Services/StateHandover.swift`) owns the only occurrences of `LaunchDeck` and
   `local.launchdeck.app` in the repo. It runs once from the app's startup path, copies

@@ -109,6 +109,7 @@ struct LaunchpadView: View {
                     onBackgroundTap: { vm.dismiss?() },
                     jumper: vm.jumper,
                     paging: vm.paging,
+                    jumpGuard: vm.jumpGuard,
                     metrics: metrics,
                     onOpenApp: { app in
                         LaunchService.launch(app)
@@ -461,6 +462,10 @@ private struct PagesScroller: View {
     /// THE page model. Deliberately **not** observed here: observing it would
     /// rebuild the grid on every settled page (see `PagingModel`'s invariant).
     let paging: PagingModel
+    /// Arbitration for programmatic jumps, owned by the view model. A class, and
+    /// deliberately not observed here: recording the page each geometry callback
+    /// reports must **not** re-evaluate this view on every scroll tick.
+    let jumpGuard: PageJumpGuard
     let metrics: GridMetrics
     let onOpenApp: (AppInfo) -> Void
     let onOpenFolder: (UUID) -> Void
@@ -501,8 +506,12 @@ private struct PagesScroller: View {
                     let width = max(geometry.containerSize.width, 1)
                     return Int((geometry.contentOffset.x / width).rounded())
                 } action: { _, page in
-                    guard page >= 0, page < pageCount,
-                          page != paging.resolved(count: pageCount) else { return }
+                    guard page >= 0, page < pageCount else { return }
+                    // A jump reports every page it passes through on the way. One
+                    // of those adopted here would overwrite the jump before it
+                    // lands and persist the wrong page — see `PageJumpGuard`.
+                    guard jumpGuard.observe(reported: page,
+                                            requested: paging.resolved(count: pageCount)) else { return }
                     paging.set(page, count: pageCount)
                     onPageSettled(page)
                 }
@@ -515,13 +524,47 @@ private struct PagesScroller: View {
                         .onEnded { _ in onDragCommit() }
                 )
                 .onChange(of: jumper.target) { _, target in
-                    guard let target else { return }
-                    DispatchQueue.main.async { jumper.target = nil }
-                    withAnimation(.easeInOut(duration: 0.22)) {
-                        proxy.scrollTo(min(max(target, 0), pageCount - 1), anchor: .center)
-                    }
+                    applyJump(target, proxy: proxy)
+                }
+                // A target published *before* this view existed never reaches
+                // `onChange` at all: `onChange` reports changes, and by the time
+                // the grid appears the change has already happened. That is
+                // exactly the resume-last-page case — the window controller names
+                // the page as it builds the view. Consuming it here is what makes
+                // the jump happen, instead of being lost and then overwritten by
+                // the grid's own first report.
+                .onAppear {
+                    // `show()` has already cleared the guard, through
+                    // `vm.reset()`, so all that is left is to consume the page
+                    // the controller asked for.
+                    applyJump(jumper.target, proxy: proxy, animated: false)
                 }
             }
+        }
+    }
+
+    /// Drives the scroll view to a jumped-to page.
+    ///
+    /// - Parameter animated: `false` for the page restored at open. Animating
+    ///   that one would show the first page sliding across to the remembered one,
+    ///   which is not what "resume where I left off" means.
+    private func applyJump(_ target: Int?, proxy: ScrollViewProxy, animated: Bool = true) {
+        guard let target else { return }
+        // Clear the signal first: the jump no longer needs the value, and
+        // publishing from inside a view update is not safe.
+        DispatchQueue.main.async { jumper.target = nil }
+        let clamped = min(max(target, 0), pageCount - 1)
+        paging.set(clamped, count: pageCount)
+        // Arm *before* asking for the scroll: the scroll view can report the page
+        // it is leaving within the same frame, and by then the guard has to
+        // already know a jump is on its way.
+        guard jumpGuard.arm(clamped) else { return }
+        if animated {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                proxy.scrollTo(clamped, anchor: .center)
+            }
+        } else {
+            proxy.scrollTo(clamped, anchor: .center)
         }
     }
 
@@ -615,6 +658,9 @@ private struct PagesScroller: View {
     /// Start the drag from the slot under the pointer's *starting* position,
     /// then keep tracking on this stable view.
     private func handleDragChange(_ value: DragGesture.Value) {
+        // The user is driving, so a jump that has not landed loses its claim on
+        // the next report: their finger outranks an animation in flight.
+        jumpGuard.disarm()
         let page = paging.resolved(count: store.pages.count)
         let items = (page >= 0 && page < store.pages.count) ? store.pages[page] : []
 

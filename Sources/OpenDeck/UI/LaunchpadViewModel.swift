@@ -25,6 +25,12 @@ final class LaunchpadViewModel: ObservableObject {
     let store: DeckStore
     let paging = PagingModel()
     let jumper = PageJumper()
+    /// Arbitration for programmatic jumps. Owned here rather than by the grid
+    /// because it describes the relationship between `paging` and the scroll
+    /// view, and because `reset()` is the one place that knows a deck is being
+    /// built anew — a guard left armed on a rebuilt grid would swallow the first
+    /// scroll of the new session.
+    let jumpGuard = PageJumpGuard()
     /// Set by the window controller so keyboard actions can dismiss the deck.
     var dismiss: (() -> Void)?
     /// Set by the window controller so the gear button can open settings.
@@ -169,6 +175,7 @@ final class LaunchpadViewModel: ObservableObject {
         store.endDragSession()
         paging.reset()
         jumper.target = nil
+        jumpGuard.reset()
     }
 
     // MARK: - Keyboard

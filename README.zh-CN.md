@@ -39,7 +39,7 @@ cp -R build/OpenDeck.app /Applications/     # 留在系统里（同时让「登�
 ## 验证
 
 ```sh
-./build/OpenDeck.app/Contents/MacOS/OpenDeck --selftest    # 270 项无头检查
+./build/OpenDeck.app/Contents/MacOS/OpenDeck --selftest    # 288 项无头检查
 ./build/OpenDeck.app/Contents/MacOS/OpenDeck --bench 60    # 翻页耗时
 ```
 

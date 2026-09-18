@@ -47,10 +47,16 @@ final class LaunchpadWindowController {
         let metrics = GridMetrics.make(for: screen)
         store.metrics = metrics
         vm.reset()
-        // "Saved State": reopen on the page the user left off on. `paging.set`
-        // clamps internally and the jump signal carries the clamped value.
+        // "Saved State": reopen on the page the user left off on.
+        //
+        // Only the *request* is published here — `paging` is deliberately left
+        // alone. The page count is known at this point but the scroll view does
+        // not exist yet, so claiming a page here leaves the model describing a
+        // grid it has not moved to, and `PagesScroller` adopts that first report
+        // as the user's, overwriting the jump before it lands. The grid consumes
+        // this value on appear and clamps it there (see `PageJumpGuard`).
         if DeckSettings.shared.resumeLastPage {
-            vm.jumper.target = vm.paging.set(DeckSettings.shared.lastPage, count: vm.pageCount)
+            vm.jumper.target = DeckSettings.shared.lastPage
         }
         vm.dismiss = { [weak self] in self?.hide() }
         vm.openSettings = {

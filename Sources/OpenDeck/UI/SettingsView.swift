@@ -474,12 +474,18 @@ struct SettingsView: View {
         }
     }
 
+    /// Read from the bundle rather than written out by hand here: the two used
+    /// to disagree — `Info.plist` said 0.1.0 while this line said 0.2.0.
+    private static var version: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+    }
+
     private var aboutSection: some View {
         Section2("About") {
-            Text("LaunchDeck 0.2.0 — a local Launchpad replacement.")
+            Text("OpenDeck \(Self.version) — a local Launchpad replacement.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("Layout file: ~/Library/Application Support/LaunchDeck/layout.json")
+            Text("Layout file: ~/Library/Application Support/OpenDeck/layout.json")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
@@ -515,11 +521,11 @@ struct Section2<Content: View>: View {
 }
 
 extension Notification.Name {
-    static let deckHotKeyChanged = Notification.Name("LaunchDeck.hotKeyChanged")
-    static let deckPinchChanged = Notification.Name("LaunchDeck.pinchChanged")
-    static let deckLaunchpadKeyChanged = Notification.Name("LaunchDeck.launchpadKeyChanged")
-    static let deckHotCornerChanged = Notification.Name("LaunchDeck.hotCornerChanged")
+    static let deckHotKeyChanged = Notification.Name("OpenDeck.hotKeyChanged")
+    static let deckPinchChanged = Notification.Name("OpenDeck.pinchChanged")
+    static let deckLaunchpadKeyChanged = Notification.Name("OpenDeck.launchpadKeyChanged")
+    static let deckHotCornerChanged = Notification.Name("OpenDeck.hotCornerChanged")
     /// Posted when the deck is shown, asking for a throttled rescan of the
     /// application folders (a safety net for a missed FSEvents event).
-    static let deckRescanRequested = Notification.Name("LaunchDeck.rescanRequested")
+    static let deckRescanRequested = Notification.Name("OpenDeck.rescanRequested")
 }

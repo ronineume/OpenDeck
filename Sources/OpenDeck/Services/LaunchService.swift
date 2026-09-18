@@ -21,7 +21,7 @@ enum LaunchService {
         config.activates = true
         NSWorkspace.shared.openApplication(at: app.url, configuration: config) { _, error in
             if let error {
-                NSLog("LaunchDeck: failed to launch \(app.path): \(error.localizedDescription)")
+                NSLog("OpenDeck: failed to launch \(app.path): \(error.localizedDescription)")
             }
         }
     }
@@ -44,7 +44,7 @@ enum LaunchService {
         var error: NSDictionary?
         NSAppleScript(source: source)?.executeAndReturnError(&error)
         if let error {
-            NSLog("LaunchDeck: Get Info failed: \(error)")
+            NSLog("OpenDeck: Get Info failed: \(error)")
         }
     }
 

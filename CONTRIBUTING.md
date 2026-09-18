@@ -1,33 +1,34 @@
-# Contributing to LaunchDeck
+# Contributing to OpenDeck
 
 Thanks for taking a look. This is a small, deliberately dependency-free macOS app —
 one `swiftc` invocation, no Xcode project, no SwiftPM, no third-party packages.
 
 ## Requirements
 
-- macOS 15 (Sequoia) or later, on Apple silicon
+- **Deployment target:** macOS 15, Apple silicon
+- **Developed and tested on:** macOS 27 (26A428)
 - Xcode **or** the Command Line Tools (`xcode-select --install`)
 
 ## Build and test
 
 ```sh
-./build.sh                     # release build -> build/LaunchDeck.app
+./build.sh                     # release build -> build/OpenDeck.app
 ./build.sh debug               # debug build
-./build/LaunchDeck.app/Contents/MacOS/LaunchDeck --selftest
+./build/OpenDeck.app/Contents/MacOS/OpenDeck --selftest
 ```
 
 `--selftest` is the project's safety net: it runs headless, uses a throwaway layout
-file, and never touches your real `~/Library/Application Support/LaunchDeck/layout.json`.
+file, and never touches your real `~/Library/Application Support/OpenDeck/layout.json`.
 Please run it before opening a PR, and keep it green.
 
 Two more harnesses are available while working:
 
 ```sh
 # offscreen render — no Screen Recording permission needed
-./build/LaunchDeck.app/Contents/MacOS/LaunchDeck --snapshot /tmp/deck.png
+./build/OpenDeck.app/Contents/MacOS/OpenDeck --snapshot /tmp/deck.png
 
 # page-switch timing, and a regression check that the page dots follow the scroll
-./build/LaunchDeck.app/Contents/MacOS/LaunchDeck --bench 60
+./build/OpenDeck.app/Contents/MacOS/OpenDeck --bench 60
 ```
 
 ## Adding a check
@@ -35,7 +36,7 @@ Two more harnesses are available while working:
 A new assertion is only worth adding if it can fail. After you add one, prove it:
 
 ```sh
-python3 Tools/mutation-test.py                 # every mutation
+python3 Tools/mutation-test.py                  # every mutation
 python3 Tools/mutation-test.py M5-your-mutation # just one
 ```
 
@@ -59,8 +60,14 @@ Anchors must be unique within the file they patch; a drifted anchor is reported 
   `PageJumper`, never `PagingModel` — merging them rebuilds up to 175 cells per scroll
   tick. This invariant is held by comments and review, not by the test suite.
 - **Read-only stores stay read-only.** `DeckStore(readOnly: true)` is a per-call-site
-  guarantee. The dev tools (`--bench`, `--snapshot`) pass it; any new call site must
-  too, or it can overwrite a real user's layout.
+  guarantee, and it covers more than `save()`: `--bench` and `--snapshot` must not even
+  carry state over. Any new call site that builds a store without an explicit `storeURL`
+  is a call site that can write into a real user's Application Support folder.
+- **The pre-rename identity lives in exactly one place.** `StateHandover`
+  (`Services/StateHandover.swift`) owns the only occurrences of `LaunchDeck` and
+  `local.launchdeck.app` in the repo. It runs once from the app's startup path, copies
+  instead of moving, and never overwrites live state — it is the only path that can
+  strand a user's layout, so keep it copy-only and keep its checks green.
 - **Comments explain why, not what.** Where a fix looks arbitrary, say which failure it
   prevents — several existing comments do exactly that, and they are the most useful
   documentation in the repo.
@@ -77,5 +84,5 @@ Anchors must be unique within the file they patch; a drifted anchor is reported 
 
 Include your macOS version, the build you ran (`./build.sh` from which commit), and
 what you expected versus what happened. If the deck lost or duplicated layout entries,
-please attach a copy of `~/Library/Application Support/LaunchDeck/layout.json` — that
+please attach a copy of `~/Library/Application Support/OpenDeck/layout.json` — that
 file is the whole persisted state, so it is usually enough to reproduce.

@@ -36,7 +36,7 @@ final class SettingsWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "LaunchDeck Settings"
+        window.title = "OpenDeck Settings"
         window.contentView = hosting
         window.isReleasedWhenClosed = false
         window.center()

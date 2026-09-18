@@ -3,7 +3,7 @@ import Foundation
 
 /// Headless verification of the logic that cannot be eyeballed in a screenshot.
 ///
-/// Run with `LaunchDeck --selftest`. Uses a throwaway layout file so the real
+/// Run with `OpenDeck --selftest`. Uses a throwaway layout file so the real
 /// one is never touched, and never deletes anything on disk.
 @MainActor
 enum SelfTest {
@@ -23,7 +23,7 @@ enum SelfTest {
 
     static func run() -> Int32 {
         let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-selftest-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-selftest-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: tempURL) }
 
         let store = DeckStore(storeURL: tempURL)
@@ -236,7 +236,7 @@ enum SelfTest {
         // A `hidden` id whose app is gone must be dropped (so a reinstall shows
         // up again); a `hidden` id whose app is still installed must survive.
         let hiddenURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-hidden-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-hidden-\(UUID().uuidString).json")
         guard let liveApp = store.visibleApps.first else {
             print("FAIL  no app available for the hidden-cleanup test"); return 1
         }
@@ -360,7 +360,7 @@ enum SelfTest {
 
         section("Installing and removing apps syncs the grid")
         let syncURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-sync-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-sync-\(UUID().uuidString).json")
         let syncer = DeckStore(storeURL: syncURL)
         syncer.metrics = GridMetrics(columns: 7, rows: 5, iconSize: 81, cellWidth: 177, cellHeight: 135)
         let slotsBefore = syncer.pages.flatMap { $0 }.count
@@ -391,7 +391,7 @@ enum SelfTest {
 
         section("Merging an app into an existing folder")
         let mergeURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-merge-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-merge-\(UUID().uuidString).json")
         let merger = DeckStore(storeURL: mergeURL)
         merger.metrics = GridMetrics(columns: 7, rows: 5, iconSize: 81, cellWidth: 177, cellHeight: 135)
         let mergeIDs = Array(merger.visibleApps.prefix(3)).map(\.id)
@@ -422,7 +422,7 @@ enum SelfTest {
         // `sorted()` trap via Dictionary(uniqueKeysWithValues:) on the next
         // launch. Load such a file from disk and make sure it heals.
         let dupURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-duporder-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-duporder-\(UUID().uuidString).json")
         let dupIDs = Array(store.visibleApps.prefix(3)).map(\.id)
         if dupIDs.count == 3 {
             let dupApp = dupIDs[0]
@@ -483,7 +483,7 @@ enum SelfTest {
         // UI can no longer produce but old on-disk files still contain.
         func loadStore(pages: String, foldersJSON: String, tag: String) -> DeckStore {
             let url = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("launchdeck-inv-\(tag)-\(UUID().uuidString).json")
+                .appendingPathComponent("opendeck-inv-\(tag)-\(UUID().uuidString).json")
             let json = """
             {
               "pages": \(pages),
@@ -553,7 +553,7 @@ enum SelfTest {
 
             // ⑤ the mutation entry points enforce I1 too.
             let mutURL = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("launchdeck-inv-mut-\(UUID().uuidString).json")
+                .appendingPathComponent("opendeck-inv-mut-\(UUID().uuidString).json")
             let mutant = DeckStore(storeURL: mutURL)
             let mutIDs = Array(mutant.visibleApps.prefix(4)).map(\.id)
             if mutIDs.count == 4 {
@@ -582,7 +582,7 @@ enum SelfTest {
             // regression here would have shipped silently. This case makes that
             // exact mutation fail.
             let reparentURL = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("launchdeck-inv-reparent-\(UUID().uuidString).json")
+                .appendingPathComponent("opendeck-inv-reparent-\(UUID().uuidString).json")
             let reparent = DeckStore(storeURL: reparentURL)
             reparent.makeFolder(dropping: x, onto: y)   // FA = {y, x}
             let fa = reparent.folders.values.first { $0.appIDs.contains(y) }
@@ -602,7 +602,7 @@ enum SelfTest {
             // directly here so the breach survives — `reconcile()` at load
             // would heal it before the mutation entry could see it.
             let dualURL = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("launchdeck-inv-dual-\(UUID().uuidString).json")
+                .appendingPathComponent("opendeck-inv-dual-\(UUID().uuidString).json")
             let dual = DeckStore(storeURL: dualURL)
             let dualIDs = Array(dual.visibleApps.prefix(3)).map(\.id)
             if dualIDs.count >= 3 {
@@ -674,7 +674,7 @@ enum SelfTest {
 
         section("Drag write batching (review A2)")
         let probeURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-batch-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-batch-\(UUID().uuidString).json")
         let batched = DeckStore(storeURL: probeURL)
         batched.metrics = GridMetrics(columns: 7, rows: 5, iconSize: 81, cellWidth: 177, cellHeight: 135)
         batched.save()
@@ -818,7 +818,7 @@ enum SelfTest {
 
         section("Paging SSOT — deferred reclamation & drop revive (review #11)")
         let ssotURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-ssot-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-ssot-\(UUID().uuidString).json")
         let ssot = DeckStore(storeURL: ssotURL)
         ssot.metrics = GridMetrics(columns: 7, rows: 5, iconSize: 81, cellWidth: 177, cellHeight: 135)
 
@@ -1016,7 +1016,7 @@ enum SelfTest {
         // reconstructed layout: the damaged bytes are kept as a `.corrupt-*`
         // sibling and the store degrades to read-only.
         let corruptURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-corrupt-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-corrupt-\(UUID().uuidString).json")
         let damagedText = "{ this is not valid json "
         try? Data(damagedText.utf8).write(to: corruptURL)
         let damagedStore = DeckStore(storeURL: corruptURL)
@@ -1043,7 +1043,7 @@ enum SelfTest {
         // real syntax/truncation error is fatal.
         let liveID = store.visibleApps.first?.id ?? "com.apple.Safari"
         let missingURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-missing-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-missing-\(UUID().uuidString).json")
         let missingJSON = #"{"pages": [["app:\#(liveID)"]], "folders": [], "hidden": []}"#
         try? Data(missingJSON.utf8).write(to: missingURL)
         let missingStore = DeckStore(storeURL: missingURL)
@@ -1059,7 +1059,7 @@ enum SelfTest {
         section("P0 data safety — recovery from the backup (A2)")
         // (c) A damaged main file with a readable `.bak` recovers its data.
         let recoverURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-recover-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-recover-\(UUID().uuidString).json")
         let recoverBak = recoverURL.appendingPathExtension("bak")
         let goodJSON = #"{"pages": [["app:\#(liveID)"]], "folders": [], "hidden": [], "sortKey": "name", "sortOrder": "descending", "customOrder": []}"#
         try? Data(goodJSON.utf8).write(to: recoverBak)
@@ -1086,7 +1086,7 @@ enum SelfTest {
         section("P0 data safety — write-before rotation keeps the previous layout (A2)")
         // (d) Each save leaves the *previous* on-disk layout behind as `.bak`.
         let rotateURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-rotate-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-rotate-\(UUID().uuidString).json")
         let rotateStore = DeckStore(storeURL: rotateURL)
         rotateStore.save()
         let rotateV1 = try? Data(contentsOf: rotateURL)
@@ -1107,7 +1107,7 @@ enum SelfTest {
         // this asserts the in-process byte stability AND the emitted-array-is-
         // sorted property; it cannot by itself prove cross-process determinism.
         let hiddenBytesURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-hiddenbytes-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-hiddenbytes-\(UUID().uuidString).json")
         let hiddenStore = DeckStore(storeURL: hiddenBytesURL)
         if hiddenStore.visibleApps.count >= 3 {
             hiddenStore.setHidden(hiddenStore.visibleApps[0].id, true)
@@ -1141,12 +1141,12 @@ enum SelfTest {
             return String(decoding: data, as: UTF8.self)
         }
         let emptyPagesURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-emptypages-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-emptypages-\(UUID().uuidString).json")
         // Learn the exact app-id set a *fresh* store sees: the long-lived `store`
         // above has had one app hidden by an earlier section, so its `visibleApps`
         // is not the set this brand-new store will load.
         let freshProbeURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-probe-\(UUID().uuidString).json")
+            .appendingPathComponent("opendeck-probe-\(UUID().uuidString).json")
         let allIDs = DeckStore(storeURL: freshProbeURL).visibleApps.map(\.id)
         try? FileManager.default.removeItem(at: freshProbeURL)
         try? FileManager.default.removeItem(at: freshProbeURL.appendingPathExtension("bak"))
@@ -1181,7 +1181,7 @@ enum SelfTest {
         // `save()` over the only copy) and degrade instead — and must not claim a
         // copy was kept.
         let lockedDir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-locked-\(UUID().uuidString)")
+            .appendingPathComponent("opendeck-locked-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: lockedDir, withIntermediateDirectories: true)
         let lockedURL = lockedDir.appendingPathComponent("layout.json")
         let lockedJSON = #"{"pages": [], "folders": [], "hidden": [], "sortKey": "manual", "sortOrder": "ascending", "customOrder": []}"#
@@ -1221,7 +1221,7 @@ enum SelfTest {
         let reviewEmptyJSON = "{\"pages\": [], \"folders\": [], \"hidden\": [], \"sortKey\": \"manual\", \"sortOrder\": \"ascending\", \"customOrder\": []}"
         func tempFile(_ tag: String) -> URL {
             URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("launchdeck-\(tag)-\(UUID().uuidString).json")
+                .appendingPathComponent("opendeck-\(tag)-\(UUID().uuidString).json")
         }
         func sweep(_ url: URL, _ marker: String) {
             for sibling in siblingFiles(of: url, containing: marker) {
@@ -1398,7 +1398,7 @@ enum SelfTest {
                 && !UninstallItem.defaultSelection(for: nameCand))
         let ghostApp = AppInfo(
             path: "/Applications/ZZ Code.app",
-            bundleID: "com.launchdeck.selftest.definitely.absent",
+            bundleID: "com.opendeck.selftest.definitely.absent",
             name: "Code",
             addedDate: nil,
             lastUsedDate: nil
@@ -1621,6 +1621,135 @@ enum SelfTest {
         check("🔴A(one) a second scan confirms it and drops the mark",
               markVictim.map { !slotStore.hidden.contains($0.id) } == true)
         sweep(slotURL, ".empty-pages-")
+
+        // ------------------------------------------------------------------
+        // Rename handover — the identity this app carried before it was
+        // renamed to OpenDeck.
+        //
+        // Everything below runs against throwaway folders, or against a pure
+        // function. The real Application Support folder is never opened: the
+        // handover exists to write live user state, so exercising it for real
+        // from a test would be the very thing it must not do.
+        // ------------------------------------------------------------------
+        section("Rename handover")
+
+        let currentFile = URL(fileURLWithPath: "/tmp/opendeck-selftest-current/layout.json")
+        let legacyFile = URL(fileURLWithPath: "/tmp/opendeck-selftest-legacy/layout.json")
+        let absent: (URL) -> Bool = { _ in false }
+        let present: (URL) -> Bool = { _ in true }
+
+        check("an explicit store URL always wins", {
+            StateHandover.resolveLayout(storeURL: currentFile, readOnly: true,
+                                        current: currentFile, legacy: legacyFile,
+                                        exists: present) == currentFile
+        }())
+        check("a writable store never opens the pre-rename file", {
+            StateHandover.resolveLayout(storeURL: nil, readOnly: false,
+                                        current: currentFile, legacy: legacyFile,
+                                        exists: present) == currentFile
+        }())
+        // The same rule, in the only shape where a writable store *could* be
+        // routed into the pre-rename folder: the new file absent, the old one
+        // present. Checking it with everything present would pass against a
+        // build that had dropped `readOnly` from the condition entirely.
+        check("a writable store opens the new file even before it exists", {
+            StateHandover.resolveLayout(storeURL: nil, readOnly: false,
+                                        current: currentFile, legacy: legacyFile,
+                                        exists: { $0 == legacyFile }) == currentFile
+        }())
+        check("a read-only tool reads the pre-rename file until the new one exists", {
+            StateHandover.resolveLayout(storeURL: nil, readOnly: true,
+                                        current: currentFile, legacy: legacyFile,
+                                        exists: { $0 == legacyFile }) == legacyFile
+        }())
+        check("a read-only tool uses the new file once it exists", {
+            StateHandover.resolveLayout(storeURL: nil, readOnly: true,
+                                        current: currentFile, legacy: legacyFile,
+                                        exists: present) == currentFile
+        }())
+        // The renames are pure decisions, so `absent` exists to keep the
+        // "nothing on disk" case honest rather than implied.
+        check("nothing to hand over when neither folder has a layout", {
+            StateHandover.resolveLayout(storeURL: nil, readOnly: true,
+                                        current: currentFile, legacy: legacyFile,
+                                        exists: absent) == currentFile
+        }())
+
+        // The copy itself. File contents are arbitrary: the handover copies
+        // bytes and never parses them.
+        let handoverRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("opendeck-handover-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: handoverRoot) }
+        let oldBase = handoverRoot.appendingPathComponent(StateHandover.legacyFolderName)
+        let newBase = handoverRoot.appendingPathComponent("OpenDeck")
+        for dir in [oldBase, newBase] {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let layoutBytes = Data("opendeck-selftest-layout".utf8)
+        let backupBytes = Data("opendeck-selftest-backup".utf8)
+        try? layoutBytes.write(to: oldBase.appendingPathComponent("layout.json"))
+        try? backupBytes.write(to: oldBase.appendingPathComponent("layout.json.bak"))
+
+        let carriedNames = StateHandover.adoptLayout(from: oldBase, into: newBase)
+        check("the layout and its backup are both carried over",
+              carriedNames == StateHandover.layoutFiles, "\(carriedNames)")
+        check("the carried-over bytes are identical",
+              (try? Data(contentsOf: newBase.appendingPathComponent("layout.json"))) == layoutBytes
+              && (try? Data(contentsOf: newBase.appendingPathComponent("layout.json.bak"))) == backupBytes)
+        check("the pre-rename folder is left untouched (a copy, never a move)",
+              (try? Data(contentsOf: oldBase.appendingPathComponent("layout.json"))) == layoutBytes
+              && (try? Data(contentsOf: oldBase.appendingPathComponent("layout.json.bak"))) == backupBytes)
+
+        let liveBytes = Data("opendeck-selftest-live".utf8)
+        try? liveBytes.write(to: newBase.appendingPathComponent("layout.json"))
+        // The default `copyItem` refuses an existing destination on its own, so
+        // this cannot be checked through it: a build with no no-overwrite guard
+        // would still leave the live file alone and look correct. The guard has
+        // to be observed by *whether the copy is attempted at all*, so this seam
+        // records calls and clobbers, the way a replace-style copy would.
+        var clobberingSeams = FileSeams()
+        var attempted: [String] = []
+        clobberingSeams.copyItem = { source, destination in
+            attempted.append(destination.lastPathComponent)
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.copyItem(at: source, to: destination)
+        }
+        let secondPass = StateHandover.adoptLayout(from: oldBase, into: newBase, seams: clobberingSeams)
+        check("a second handover never overwrites the live layout",
+              (try? Data(contentsOf: newBase.appendingPathComponent("layout.json"))) == liveBytes,
+              "\(secondPass)")
+        check("a second handover does not even attempt the copy", attempted.isEmpty, "\(attempted)")
+
+        // A copy that reports success and writes nothing. Reaching the reporting
+        // line is not evidence that anything landed, so "carried over" has to
+        // mean "found on disk afterwards".
+        let silentBase = handoverRoot.appendingPathComponent("Silent")
+        try? FileManager.default.createDirectory(at: silentBase, withIntermediateDirectories: true)
+        var silentSeams = FileSeams()
+        silentSeams.copyItem = { _, _ in }
+        let silentClaim = StateHandover.adoptLayout(from: oldBase, into: silentBase, seams: silentSeams)
+        check("a copy that silently writes nothing is not reported as carried over",
+              silentClaim.isEmpty, "\(silentClaim)")
+
+        let failingBase = handoverRoot.appendingPathComponent("Failing")
+        try? FileManager.default.createDirectory(at: failingBase, withIntermediateDirectories: true)
+        var failingSeams = FileSeams()
+        failingSeams.copyItem = { _, _ in throw CocoaError(.fileWriteNoPermission) }
+        let claimed = StateHandover.adoptLayout(from: oldBase, into: failingBase, seams: failingSeams)
+        check("a copy that fails is not reported as carried over", claimed.isEmpty, "\(claimed)")
+
+        // Preferences, as a pure decision — no preferences domain is touched.
+        let legacyPrefs: [String: Any] = ["hotKeyCode": 49, "hotKeyEnabled": true, "backdropMode": "glass"]
+        let adoptedPrefs = StateHandover.preferencesToAdopt(from: legacyPrefs,
+                                                            current: ["backdropMode": "solid"])
+        check("preferences the new domain lacks are adopted",
+              adoptedPrefs["hotKeyCode"] as? Int == 49
+              && adoptedPrefs["hotKeyEnabled"] as? Bool == true,
+              "\(adoptedPrefs.keys.sorted())")
+        check("a preference the new domain already has is not clobbered",
+              adoptedPrefs["backdropMode"] == nil)
+        check("keys the legacy domain does not carry are not invented",
+              StateHandover.preferencesToAdopt(from: ["hotKeyCode": 49], current: [:]).count == 1)
 
         print("\n\(checks - failures)/\(checks) checks passed, \(failures) failed")
         return failures == 0 ? 0 : 1

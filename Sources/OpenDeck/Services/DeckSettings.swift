@@ -122,6 +122,22 @@ final class DeckSettings: ObservableObject {
     @Published var layoutHealthMessage: String?
 
     private init() {
+        // Hand the pre-rename preferences over before anything else in here.
+        //
+        // Every `@Published` property below carries a `didSet` that writes back
+        // to `defaults`, and `hotKeySpec` is assigned a spec built from the
+        // registration defaults — so a process that constructs this object
+        // before the handover has run stamps the built-in defaults into the new
+        // domain. `--selftest` does exactly that: it builds a
+        // `LaunchpadViewModel`, which reads `DeckSettings.shared`. The handover
+        // would then find those keys already present, skip them, and quietly
+        // replace the user's own hot key with the default one.
+        let carried = StateHandover.preferencesToCarryOver()
+        for (key, value) in carried { defaults.set(value, forKey: key) }
+        if !carried.isEmpty {
+            NSLog("OpenDeck: took over %d preference(s) from the pre-rename install", carried.count)
+        }
+
         defaults.register(defaults: [
             Key.backdropMode: BackdropMode.glass.rawValue,
             Key.dimStrength: 0.18,
@@ -173,7 +189,7 @@ final class DeckSettings: ObservableObject {
             startAtLoginError = nil
         } catch {
             startAtLoginError = error.localizedDescription
-            NSLog("LaunchDeck: start at login failed: \(error)")
+            NSLog("OpenDeck: start at login failed: \(error)")
         }
     }
 }

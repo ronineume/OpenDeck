@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Renders the deck to a PNG without needing Screen Recording permission.
 ///
-/// This is a development aid: `LaunchDeck --snapshot <path>` builds the real
+/// This is a development aid: `OpenDeck --snapshot <path>` builds the real
 /// view hierarchy, lets SwiftUI settle, then caches the layer to a bitmap.
 enum SnapshotRunner {
     @MainActor

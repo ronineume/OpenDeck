@@ -51,7 +51,7 @@ final class AppWatcher {
             2.0,
             flags
         ) else {
-            NSLog("LaunchDeck: could not create the application-folder watcher")
+            NSLog("OpenDeck: could not create the application-folder watcher")
             return false
         }
 
@@ -59,7 +59,7 @@ final class AppWatcher {
         guard FSEventStreamStart(stream) else {
             FSEventStreamInvalidate(stream)
             FSEventStreamRelease(stream)
-            NSLog("LaunchDeck: could not start the application-folder watcher")
+            NSLog("OpenDeck: could not start the application-folder watcher")
             return false
         }
         self.stream = stream

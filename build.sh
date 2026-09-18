@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build LaunchDeck and assemble a runnable .app bundle.
+# Build OpenDeck and assemble a runnable .app bundle.
 #
 # Uses swiftc directly rather than SwiftPM: this machine only has Command Line
 # Tools, where (a) @State is unusable (no SwiftUI macro plugin) and (b) the
@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 CONFIG="${1:-release}"
-APP="build/LaunchDeck.app"
+APP="build/OpenDeck.app"
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
 
 OPT_FLAGS=(-O)
@@ -22,13 +22,13 @@ swiftc \
   -swift-version 5 \
   "${OPT_FLAGS[@]}" \
   $(find Sources -name '*.swift' | sort) \
-  -o build/LaunchDeck
+  -o build/OpenDeck
 
 echo "==> assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-cp build/LaunchDeck "$APP/Contents/MacOS/LaunchDeck"
+cp build/OpenDeck "$APP/Contents/MacOS/OpenDeck"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 

@@ -130,7 +130,7 @@ final class HotKeyManager {
         )
         guard installStatus == noErr else {
             lastError = "Could not install the hot key handler."
-            NSLog("LaunchDeck: InstallEventHandler failed (\(installStatus))")
+            NSLog("OpenDeck: InstallEventHandler failed (\(installStatus))")
             return false
         }
 
@@ -144,7 +144,7 @@ final class HotKeyManager {
             &hotKeyRef
         )
         if status != noErr {
-            NSLog("LaunchDeck: RegisterEventHotKey failed (\(status)) for \(spec.displayString)")
+            NSLog("OpenDeck: RegisterEventHotKey failed (\(status)) for \(spec.displayString)")
             lastError = "\(spec.displayString) is already taken by another app."
             return false
         }

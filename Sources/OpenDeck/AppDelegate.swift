@@ -20,6 +20,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         buildMainMenu()
 
+        // The app was called LaunchDeck before the rename, which moved both the
+        // layout folder and the preferences domain. The store below hands its
+        // own layout over; the preferences are handed over by `DeckSettings`,
+        // which has to happen before anything writes a default — so it lives
+        // there, not here.
+        let carriedFiles = StateHandover.adoptEverything()
+        if !carriedFiles.isEmpty {
+            NSLog("OpenDeck: took over %d layout file(s) from the pre-rename install",
+                  carriedFiles.count)
+        }
+
         RunningApps.start()
 
         store = DeckStore()
@@ -43,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // A failed watcher silently degrades to "scan only at launch", so
             // surface it in Settings instead of leaving the NSLog as the only trace.
             DeckSettings.shared.appWatcherError =
-                "Application-folder watching could not start — newly installed or removed apps will not appear until LaunchDeck is relaunched."
+                "Application-folder watching could not start — newly installed or removed apps will not appear until OpenDeck is relaunched."
         } else {
             DeckSettings.shared.appWatcherError = nil
         }
@@ -93,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastScanAt = Date()
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let scanned = AppScanner.scan()
-            NSLog("LaunchDeck: rescan after folder change -> %d apps", scanned.count)
+            NSLog("OpenDeck: rescan after folder change -> %d apps", scanned.count)
             DispatchQueue.main.async { self?.store.applyScan(scanned) }
         }
     }
@@ -110,7 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func toggleDeck() {
         // Never stack the deck on top of our own settings windows.
-        if let window = NSApp.keyWindow, window.title.hasPrefix("LaunchDeck Settings") {
+        if let window = NSApp.keyWindow, window.title.hasPrefix("OpenDeck Settings") {
             return
         }
         windowController.toggle()
@@ -244,7 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
         appMenu.addItem(
-            withTitle: "About LaunchDeck",
+            withTitle: "About OpenDeck",
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
@@ -256,13 +267,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         appMenu.addItem(.separator())
         appMenu.addItem(
-            withTitle: "Hide LaunchDeck",
+            withTitle: "Hide OpenDeck",
             action: #selector(NSApplication.hide(_:)),
             keyEquivalent: "h"
         )
         appMenu.addItem(.separator())
         appMenu.addItem(
-            withTitle: "Quit LaunchDeck",
+            withTitle: "Quit OpenDeck",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )

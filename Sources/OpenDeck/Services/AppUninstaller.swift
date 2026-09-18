@@ -145,7 +145,7 @@ enum AppUninstaller {
             do {
                 try FileManager.default.trashItem(at: candidate.url, resultingItemURL: nil)
             } catch {
-                NSLog("LaunchDeck: could not trash \(candidate.path): \(error.localizedDescription)")
+                NSLog("OpenDeck: could not trash \(candidate.path): \(error.localizedDescription)")
                 failures.append(candidate.path)
             }
         }
@@ -174,11 +174,11 @@ enum AppUninstaller {
         var error: NSDictionary?
         NSAppleScript(source: script)?.executeAndReturnError(&error)
         if let error {
-            NSLog("LaunchDeck: authorized delete failed: \(error)")
+            NSLog("OpenDeck: authorized delete failed: \(error)")
         }
         let remaining = candidates.filter { FileManager.default.fileExists(atPath: $0.path) }
         if !remaining.isEmpty {
-            NSLog("LaunchDeck: authorized delete left \(remaining.count) of \(candidates.count) item(s) in place")
+            NSLog("OpenDeck: authorized delete left \(remaining.count) of \(candidates.count) item(s) in place")
         }
         return remaining.isEmpty
     }

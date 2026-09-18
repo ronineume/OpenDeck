@@ -101,6 +101,35 @@ MUTATIONS = [
         "        unconfirmedAbsent = [] // MUTATION: believe a single missing observation",
         "revert the per-app rule: one missing scan observation dissolves folders and drops marks",
     ),
+    (
+        "M11-writable-store-may-read-the-pre-rename-file",
+        "StateHandover.swift",
+        "        guard readOnly, !exists(current), exists(legacy) else { return current }",
+        "        guard !exists(current), exists(legacy) else { return current }",
+        "revert the readOnly term: a writable store can be routed into the pre-rename folder",
+    ),
+    (
+        "M12-handover-overwrites-the-live-layout",
+        "StateHandover.swift",
+        "            guard !fm.fileExists(atPath: destination.path),\n"
+        "                  fm.fileExists(atPath: source.path) else { continue }",
+        "            guard fm.fileExists(atPath: source.path) else { continue }",
+        "revert the no-overwrite guard: the older pre-rename copy replaces live state",
+    ),
+    (
+        "M13-report-a-copy-that-never-landed",
+        "StateHandover.swift",
+        "            if fm.fileExists(atPath: destination.path) { adopted.append(name) }",
+        "            adopted.append(name)  // MUTATION: claim success without checking",
+        "revert the verification: a failed copy is announced as carried over",
+    ),
+    (
+        "M14-handover-clobbers-an-existing-preference",
+        "StateHandover.swift",
+        "        for key in keys where current[key] == nil {",
+        "        for key in keys {",
+        "revert the current-domain term: a preference the user has already set is overwritten",
+    ),
 ]
 
 
@@ -141,7 +170,7 @@ def main():
     for name, filename, old, new, why in MUTATIONS:
         if only and name not in only:
             continue
-        target = os.path.join(PROJECT, "Sources", "LaunchDeck")
+        target = os.path.join(PROJECT, "Sources", "OpenDeck")
         # Locate the file (paths vary by directory).
         matches = [
             os.path.join(root, f)

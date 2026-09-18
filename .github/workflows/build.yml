@@ -23,4 +23,4 @@ jobs:
         run: ./build.sh
 
       - name: Self-test
-        run: ./build/LaunchDeck.app/Contents/MacOS/LaunchDeck --selftest
+        run: ./build/OpenDeck.app/Contents/MacOS/OpenDeck --selftest

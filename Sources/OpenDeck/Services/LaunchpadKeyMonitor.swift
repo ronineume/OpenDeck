@@ -42,7 +42,7 @@ final class LaunchpadKeyMonitor {
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            NSLog("LaunchDeck: could not create event tap for the Launchpad key")
+            NSLog("OpenDeck: could not create event tap for the Launchpad key")
             return false
         }
 

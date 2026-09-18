@@ -205,10 +205,29 @@ final class DeckStore: ObservableObject {
     init(storeURL: URL? = nil, readOnly: Bool = false, seams: FileSeams = FileSeams()) {
         self.readOnly = readOnly
         self.seams = seams
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("LaunchDeck", isDirectory: true)
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let base = support.appendingPathComponent("OpenDeck", isDirectory: true)
+        let legacyBase = support.appendingPathComponent(StateHandover.legacyFolderName, isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        self.storeURL = storeURL ?? base.appendingPathComponent("layout.json")
+        if storeURL == nil, !readOnly {
+            // Carry the pre-rename layout over before anything reads — or
+            // writes — a layout of our own. `readOnly` is excluded because
+            // "skip all writes" is a promise this initialiser makes, and a copy
+            // into a new folder is still a write.
+            let carried = StateHandover.adoptLayout(from: legacyBase, into: base, seams: seams)
+            if !carried.isEmpty {
+                FileHandle.standardError.write(
+                    Data("OpenDeck: carried over \(carried.joined(separator: ", ")) from the pre-rename folder\n".utf8)
+                )
+            }
+        }
+        self.storeURL = StateHandover.resolveLayout(
+            storeURL: storeURL,
+            readOnly: readOnly,
+            current: base.appendingPathComponent("layout.json"),
+            legacy: legacyBase.appendingPathComponent("layout.json"),
+            exists: { FileManager.default.fileExists(atPath: $0.path) }
+        )
         // Load first. Scanning must not reconcile (and therefore must not save)
         // before the on-disk layout has been read, or it would be overwritten
         // with a fresh default on every launch.
@@ -652,7 +671,7 @@ final class DeckStore: ObservableObject {
     /// instead of the corruption being swallowed.
     private func recordDataRepair(_ message: String) {
         lastError = "Repaired layout: \(message)"
-        FileHandle.standardError.write(Data("LaunchDeck: repaired layout: \(message)\n".utf8))
+        FileHandle.standardError.write(Data("OpenDeck: repaired layout: \(message)\n".utf8))
     }
 
     /// THE unconditional "drop every empty page" primitive: an interior empty
@@ -711,7 +730,7 @@ final class DeckStore: ObservableObject {
         var pages = 0
         /// Apps named by the source that are not installed here.
         var skipped: [String] = []
-        /// Apps that are installed but hidden in LaunchDeck, so not shown.
+        /// Apps that are installed but hidden in OpenDeck, so not shown.
         var hiddenSkipped: [String] = []
     }
 
@@ -956,7 +975,7 @@ final class DeckStore: ObservableObject {
     /// exact mistake those two channels exist to prevent.
     private func recordScanRejection(accountedFor: Int, referenced: Int) {
         lastError = "Ignored a rescan: only \(accountedFor) of the \(referenced) apps this layout uses are accounted for, which looks like a failed scan rather than an uninstall. Your layout was left as it was; a second matching scan will apply the change."
-        FileHandle.standardError.write(Data("LaunchDeck: discarded an implausible scan (\(accountedFor)/\(referenced) of the layout's apps accounted for); layout left untouched\n".utf8))
+        FileHandle.standardError.write(Data("OpenDeck: discarded an implausible scan (\(accountedFor)/\(referenced) of the layout's apps accounted for); layout left untouched\n".utf8))
     }
 
     /// Merge the on-disk layout with what is actually installed right now.
@@ -1237,7 +1256,7 @@ final class DeckStore: ObservableObject {
         do {
             try seams.copyItem(storeURL, staging)
         } catch {
-            NSLog("LaunchDeck: backup rotation skipped, previous backup kept: \(error.localizedDescription)")
+            NSLog("OpenDeck: backup rotation skipped, previous backup kept: \(error.localizedDescription)")
             return
         }
         if fm.fileExists(atPath: backup.path) {
@@ -1247,7 +1266,7 @@ final class DeckStore: ObservableObject {
                 _ = try fm.replaceItemAt(backup, withItemAt: staging)
                 return
             } catch {
-                NSLog("LaunchDeck: backup swap failed, previous backup kept: \(error.localizedDescription)")
+                NSLog("OpenDeck: backup swap failed, previous backup kept: \(error.localizedDescription)")
                 try? fm.removeItem(at: staging)
                 return
             }
@@ -1255,7 +1274,7 @@ final class DeckStore: ObservableObject {
         do {
             try fm.moveItem(at: staging, to: backup)
         } catch {
-            NSLog("LaunchDeck: backup move failed: \(error.localizedDescription)")
+            NSLog("OpenDeck: backup move failed: \(error.localizedDescription)")
             try? fm.removeItem(at: staging)
         }
     }
@@ -1298,14 +1317,14 @@ final class DeckStore: ObservableObject {
                     degradedReadOnly = true
                     apply(file)
                     reconcile()
-                    layoutHealthMessage = "The layout file listed no pages, which LaunchDeck never writes on its own, and a copy could not be saved as \(preservedURL.lastPathComponent). Changes made in this session will not be saved."
-                    FileHandle.standardError.write(Data("LaunchDeck: \(layoutHealthMessage ?? "")\n".utf8))
+                    layoutHealthMessage = "The layout file listed no pages, which OpenDeck never writes on its own, and a copy could not be saved as \(preservedURL.lastPathComponent). Changes made in this session will not be saved."
+                    FileHandle.standardError.write(Data("OpenDeck: \(layoutHealthMessage ?? "")\n".utf8))
                     return
                 }
                 apply(file)
                 reconcile()
-                layoutHealthMessage = "The layout file listed no pages, which LaunchDeck never writes on its own. A copy was kept as \(preservedURL.lastPathComponent) and the grid was rebuilt."
-                FileHandle.standardError.write(Data("LaunchDeck: \(layoutHealthMessage ?? "")\n".utf8))
+                layoutHealthMessage = "The layout file listed no pages, which OpenDeck never writes on its own. A copy was kept as \(preservedURL.lastPathComponent) and the grid was rebuilt."
+                FileHandle.standardError.write(Data("OpenDeck: \(layoutHealthMessage ?? "")\n".utf8))
                 return
             }
             apply(file)
@@ -1345,7 +1364,7 @@ final class DeckStore: ObservableObject {
                 layoutHealthMessage = sitePreserved
                     ? "Your layout file was unreadable. The backup \(backupURL.lastPathComponent) is intact but could not be written back, so it was left alone; the damaged file was kept as \(corruptURL.lastPathComponent). This session will not save changes."
                     : "Your layout file was unreadable. The backup \(backupURL.lastPathComponent) is intact but could not be written back, so it was left alone. The damaged file could not be preserved. This session will not save changes."
-                FileHandle.standardError.write(Data("LaunchDeck: \(lastError ?? "")\n".utf8))
+                FileHandle.standardError.write(Data("OpenDeck: \(lastError ?? "")\n".utf8))
                 return
             }
             apply(backupFile)
@@ -1360,7 +1379,7 @@ final class DeckStore: ObservableObject {
             layoutHealthMessage = sitePreserved
                 ? "Your layout file was unreadable; it was restored from a backup and the damaged file was kept as \(corruptURL.lastPathComponent)."
                 : "Your layout file was unreadable; it was restored from a backup. The damaged file could not be preserved."
-            FileHandle.standardError.write(Data("LaunchDeck: \(lastError ?? "")\n".utf8))
+            FileHandle.standardError.write(Data("OpenDeck: \(lastError ?? "")\n".utf8))
             return
         }
 
@@ -1374,7 +1393,7 @@ final class DeckStore: ObservableObject {
         layoutHealthMessage = sitePreserved
             ? "Your layout file could not be read and no usable backup was found. It was kept as \(corruptURL.lastPathComponent) and this session will not save changes."
             : "Your layout file could not be read and no usable backup was found, and it could not be preserved. This session will not save changes."
-        FileHandle.standardError.write(Data("LaunchDeck: \(lastError ?? "")\n".utf8))
+        FileHandle.standardError.write(Data("OpenDeck: \(lastError ?? "")\n".utf8))
     }
 
     /// Group many mutations into a single write. A drag used to hit the disk on
@@ -1483,7 +1502,7 @@ final class DeckStore: ObservableObject {
             try data.write(to: storeURL, options: .atomic)
         } catch {
             lastError = "Save failed: \(error.localizedDescription)"
-            NSLog("LaunchDeck: save failed: \(error)")
+            NSLog("OpenDeck: save failed: \(error)")
         }
     }
 }

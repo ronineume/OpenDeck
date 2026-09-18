@@ -261,7 +261,7 @@ struct LaunchpadView: View {
     private var deckMenu: some View {
         Button("Close") { vm.dismiss?() }
         Divider()
-        Button("LaunchDeck Settings…") { vm.openSettings?() }
+        Button("OpenDeck Settings…") { vm.openSettings?() }
         Button("Import Launchpad Layout…") {
             NotificationCenter.default.post(name: .deckOpenSettings, object: nil)
         }
@@ -269,7 +269,7 @@ struct LaunchpadView: View {
         Button("Fill Gaps") { store.fillEmptySlots(capacity: metrics.capacity) }
         Button("Reset Order") { store.restartToDefaultOrder(capacity: metrics.capacity) }
         Divider()
-        Button("Quit LaunchDeck") { NSApp.terminate(nil) }
+        Button("Quit OpenDeck") { NSApp.terminate(nil) }
     }
 
     @ViewBuilder
@@ -676,7 +676,7 @@ struct SearchBar: View {
         HStack(spacing: 9) {
             PassthroughButton(
                 systemImage: "gearshape.fill",
-                accessibilityLabel: "LaunchDeck Settings — also on right-click anywhere",
+                accessibilityLabel: "OpenDeck Settings — also on right-click anywhere",
                 action: onSettings
             )
 
@@ -765,6 +765,6 @@ struct PageDotsView: View {
 }
 
 extension Notification.Name {
-    static let deckRequestUninstall = Notification.Name("LaunchDeck.requestUninstall")
-    static let deckOpenSettings = Notification.Name("LaunchDeck.openSettings")
+    static let deckRequestUninstall = Notification.Name("OpenDeck.requestUninstall")
+    static let deckOpenSettings = Notification.Name("OpenDeck.openSettings")
 }

@@ -25,7 +25,7 @@ struct ImportedLayout {
     }
 }
 
-/// Reads macOS's Launchpad layout so it can be recreated in LaunchDeck.
+/// Reads macOS's Launchpad layout so it can be recreated in OpenDeck.
 ///
 /// The database survives the removal of Launchpad in macOS 26; it lives in the
 /// per-user temp directory rather than `~/Library/Application Support/Dock`.
@@ -111,7 +111,7 @@ enum LaunchpadImporter {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return nil }
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("launchdeck-import-\(UUID().uuidString)")
+            .appendingPathComponent("opendeck-import-\(UUID().uuidString)")
         do {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             // The WAL and shared-memory sidecars travel with the database.
@@ -122,7 +122,7 @@ enum LaunchpadImporter {
                 }
             }
         } catch {
-            NSLog("LaunchDeck: could not stage the Launchpad database: \(error)")
+            NSLog("OpenDeck: could not stage the Launchpad database: \(error)")
             try? fm.removeItem(at: dir)
             return nil
         }
@@ -137,7 +137,7 @@ enum LaunchpadImporter {
         // SQLite manage the write-ahead log in the temporary directory.
         var handle: OpaquePointer?
         guard sqlite3_open_v2(path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
-            NSLog("LaunchDeck: could not open the staged Launchpad database")
+            NSLog("OpenDeck: could not open the staged Launchpad database")
             sqlite3_close(handle)
             return nil
         }
@@ -256,7 +256,7 @@ enum LaunchpadImporter {
     private static func query(_ handle: OpaquePointer?, _ sql: String) -> [[Value]]? {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-            NSLog("LaunchDeck: query failed: \(String(cString: sqlite3_errmsg(handle)))")
+            NSLog("OpenDeck: query failed: \(String(cString: sqlite3_errmsg(handle)))")
             return nil
         }
         defer { sqlite3_finalize(statement) }

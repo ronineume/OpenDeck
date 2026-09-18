@@ -1,0 +1,26 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    # build.sh targets arm64-apple-macosx15.0, so the runner needs the macOS 15 SDK.
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          swiftc --version
+          xcrun --sdk macosx --show-sdk-path
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Self-test
+        run: ./build/LaunchDeck.app/Contents/MacOS/LaunchDeck --selftest

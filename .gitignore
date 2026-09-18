@@ -1,0 +1,24 @@
+# Build output — build.sh writes here
+build/
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Xcode, if someone opens the sources in it
+*.xcuserstate
+xcuserdata/
+DerivedData/
+
+# Local layout backups written by the app / dev tools
+*.bak
+*.tmp
+
+# Internal development notes — deliberately not published
+docs/review/
+
+# Hash baselines belonging to those reviews
+Tools/review25-baseline.sha
+Tools/review26-shas.txt

@@ -43,21 +43,6 @@ cp -R build/OpenDeck.app /Applications/     # 留在系统里（同时让「登�
 ./build/OpenDeck.app/Contents/MacOS/OpenDeck --bench 60    # 翻页耗时
 ```
 
-## 状态文件
-
-分页、文件夹、隐藏的应用与排序规则保存在
-`~/Library/Application Support/OpenDeck/layout.json`；其余设置放在 `UserDefaults` 的
-`local.opendeck.app` 域下。
-
-从 LaunchDeck（本应用改名前的名字）升级？首次启动会把旧的布局与设置**复制**过来，改名前的
-目录原样保留，所以这次升级可以随时回退。
-
-## 已知缺口
-
-- 捏合会对任意手指数触发 —— AppKit 不报告是几根手指产生的
-- 没有备份导入/导出，没有多语言，没有自动更新
-- 文件夹的放大动画作用于面板，而不是图标自身的图像
-
 ## 参与贡献
 
 见 [CONTRIBUTING.md](CONTRIBUTING.md)。

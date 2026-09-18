@@ -49,22 +49,6 @@ avoids macro-backed property wrappers (`@State`, `@Observable`) and keeps its st
 ./build/OpenDeck.app/Contents/MacOS/OpenDeck --bench 60    # page-switch timings
 ```
 
-## State
-
-Pages, folders, hidden apps and the sort rule live in
-`~/Library/Application Support/OpenDeck/layout.json`; everything else is in `UserDefaults`
-under `local.opendeck.app`.
-
-Upgrading from LaunchDeck (this app's own name before the rename)? On first launch the old
-layout and settings are **copied** over and the pre-rename folder is left untouched, so the
-change can be undone.
-
-## Known gaps
-
-- Pinch triggers on any finger count — AppKit does not report how many fingers produced it
-- No backup import/export, no localisation, no auto-update
-- The folder zoom animates the panel, not the icon's own artwork
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

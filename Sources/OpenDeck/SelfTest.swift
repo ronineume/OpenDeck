@@ -1803,6 +1803,48 @@ enum SelfTest {
         check("keys the legacy domain does not carry are not invented",
               StateHandover.preferencesToAdopt(from: ["hotKeyCode": 49], current: [:]).count == 1)
 
+        section("Click delivery on a deck that is not key")
+
+        // The deck is summoned by a hotkey while another app is frontmost, so it
+        // can be on screen and not key. AppKit spends the mouse-down on activating
+        // the app in that state and never delivers it, which is what made clicking
+        // an icon do nothing at all. The window itself cannot be exercised
+        // headlessly — it needs a window server and a real click — so the rule it
+        // follows is asserted instead.
+        var clicks = DeckClickState()
+        check("a key deck routes clicks normally",
+              clicks.route(.leftMouseDown, isKeyWindow: true) == .normal)
+        check("a key deck has nothing withdrawn", clicks.canBecomeKey)
+        check("keyboard events are never routed",
+              clicks.route(.keyDown, isKeyWindow: false) == .normal)
+
+        // The down that opens the sequence: delivered without activation, then the
+        // permission is handed straight back so activation can be reclaimed.
+        check("a non-key deck delivers the down itself, then reclaims activation",
+              clicks.route(.leftMouseDown, isKeyWindow: false) == .deliverThenActivate)
+        check("delivering that click withdraws the key permission", clicks.canBecomeKey == false)
+        clicks.finishRouting()
+        check("the key permission comes back once the event is handled", clicks.canBecomeKey)
+
+        // The up. Normally the down has made the window key by now, so the up is
+        // ordinary; if activation was refused, the up has to be routed the same way
+        // as the down or it would be swallowed for exactly the same reason.
+        check("the up of a click that won key status is ordinary",
+              clicks.route(.leftMouseUp, isKeyWindow: true) == .normal)
+        check("the up is routed as well when key status never arrived",
+              clicks.route(.leftMouseUp, isKeyWindow: false) == .deliverOnly)
+        clicks.finishRouting()
+
+        // Re-entrancy: a nested event must not hand the permission back while the
+        // click it belongs to is still in flight.
+        var nested = DeckClickState()
+        _ = nested.route(.leftMouseDown, isKeyWindow: false)
+        check("a re-entrant event is not routed a second time",
+              nested.route(.leftMouseDown, isKeyWindow: false) == .normal)
+        check("the click in flight still owns the permission", nested.canBecomeKey == false)
+        nested.finishRouting()
+        check("and releases it once it is done", nested.canBecomeKey)
+
         // A development tool must not touch live user state. `DeckSettings` writes
         // every property back through its `didSet` and its initialiser writes too,
         // and this self-test constructs it. Before the guard went in, a

@@ -196,6 +196,24 @@ MUTATIONS = [
         '    AppEnvironment.isHeadless = false  // MUTATION: nothing is headless',
         "revert the wiring: the guard exists but no run ever turns it on",
     ),
+    (
+        "M22-the-key-permission-is-never-given-back",
+        "DeckClickState.swift",
+        "    mutating func finishRouting() {\n"
+        "        isRouting = false\n"
+        "    }",
+        "    mutating func finishRouting() {\n"
+        "        // MUTATION: the permission is never given back\n"
+        "    }",
+        "revert the release: a deck that delivered one click can never be key again",
+    ),
+    (
+        "M23-clicks-are-routed-even-when-key",
+        "DeckClickState.swift",
+        "        guard !isRouting, !isKeyWindow else { return .normal }",
+        "        guard !isRouting else { return .normal }  // MUTATION: route while key too",
+        "revert the key term: every click withdraws the permission, key window or not",
+    ),
 ]
 
 

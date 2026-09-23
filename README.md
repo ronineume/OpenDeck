@@ -45,7 +45,7 @@ avoids macro-backed property wrappers (`@State`, `@Observable`) and keeps its st
 ## Verify
 
 ```sh
-./build/OpenDeck.app/Contents/MacOS/OpenDeck --selftest    # 288 headless checks
+./build/OpenDeck.app/Contents/MacOS/OpenDeck --selftest    # 299 headless checks
 ./build/OpenDeck.app/Contents/MacOS/OpenDeck --bench 60    # page-switch timings
 ```
 

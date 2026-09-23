@@ -2,10 +2,49 @@ import AppKit
 import SwiftUI
 import QuartzCore
 
-/// Borderless window that is still allowed to become key so it can take keyboard input.
+/// Borderless window that is allowed to become key so the search field can take
+/// keyboard input — but not while it is busy delivering a click.
+///
+/// The rule, and why the permission has to be withdrawn for one click, is in
+/// `DeckClickState`. In short: a window that is on screen but not key is treated
+/// by AppKit as owing the application an activation, so the mouse-down on an icon
+/// is spent on that instead of being delivered — and the icon never launches.
 final class DeckWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    private var clickState = DeckClickState()
+
+    override var canBecomeKey: Bool { clickState.canBecomeKey }
+    override var canBecomeMain: Bool { clickState.canBecomeKey }
+
+    override func sendEvent(_ event: NSEvent) {
+        let route = clickState.route(event.type, isKeyWindow: isKeyWindow)
+        guard route != .normal else {
+            super.sendEvent(event)
+            return
+        }
+
+        super.sendEvent(event)
+        // Give the permission back before activating, or `makeKeyAndOrderFront`
+        // would be asking a window that still says it cannot become key.
+        clickState.finishRouting()
+
+        // Only the down reclaims activation: by the time the up arrives the window
+        // is key again. If the down could not get it, the up is routed the same
+        // way instead — and activating there would risk resurrecting a deck that
+        // this very click has just dismissed.
+        if route == .deliverThenActivate {
+            activateAndBecomeKey()
+        }
+    }
+
+    /// Reclaim activation now that the click has been handled, so the deck is a
+    /// normal key window again for keyboard input.
+    private func activateAndBecomeKey() {
+        // The click may have launched an app and dismissed the deck; ordering a
+        // hidden window back to the front would bring it straight back.
+        guard isVisible else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        makeKeyAndOrderFront(nil)
+    }
 }
 
 /// Owns the full-screen deck window, its show/hide animation and its key handling.

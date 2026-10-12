@@ -36,7 +36,7 @@ enum BenchRunner {
         let store = DeckStore(readOnly: true)
         store.reloadApps()
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { exit(1) }
-        let metrics = GridMetrics.make(for: screen)
+        let metrics = GridMetrics.make(for: screen, preset: DeckSettings.shared.gridPreset)
         store.metrics = metrics
 
         let pageCount = max(store.pages.count, 1)

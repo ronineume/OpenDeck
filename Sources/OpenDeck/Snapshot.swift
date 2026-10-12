@@ -23,7 +23,7 @@ enum SnapshotRunner {
         store.reloadApps()
 
         let screen = NSScreen.main ?? NSScreen.screens[0]
-        let metrics = GridMetrics.make(for: screen)
+        let metrics = GridMetrics.make(for: screen, preset: DeckSettings.shared.gridPreset)
         store.metrics = metrics
 
         let wantsSettings = CommandLine.arguments.contains("--settings")

@@ -50,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyLaunchpadKey(settings.launchpadKeyEnabled)
         applyPinch(settings.pinchEnabled)
         applyHotCorner(settings.hotCorner)
+        applyMenuBarIcon(settings.showMenuBarIcon)
         if !AppWatcher.shared.start(onChange: { [weak self] in self?.refreshInstalledApps() }) {
             // A failed watcher silently degrades to "scan only at launch", so
             // surface it in Settings instead of leaving the NSLog as the only trace.
@@ -96,6 +97,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if !self.windowController.isVisible { self.showDeck() }
         }
+    }
+
+    /// Add or remove the menu-bar icon. A no-op while headless, so a development
+    /// tool cannot leave an icon on the user's screen (see `MenuBarController`).
+    private func applyMenuBarIcon(_ enabled: Bool) {
+        MenuBarController.shared.apply(enabled: enabled)
     }
 
     /// Rescan off the main thread: the scan touches Spotlight metadata for
@@ -179,6 +186,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         center.addObserver(
             self,
+            selector: #selector(menuBarIconChanged),
+            name: .deckMenuBarIconChanged,
+            object: nil
+        )
+        // The status item does not own the deck window; it asks for it.
+        center.addObserver(
+            self,
+            selector: #selector(menuBarOpened),
+            name: .deckMenuBarOpen,
+            object: nil
+        )
+        center.addObserver(
+            self,
             selector: #selector(rescanRequested),
             name: .deckRescanRequested,
             object: nil
@@ -233,6 +253,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func hotCornerChanged() {
         applyHotCorner(DeckSettings.shared.hotCorner)
+    }
+
+    @objc private func menuBarIconChanged() {
+        applyMenuBarIcon(DeckSettings.shared.showMenuBarIcon)
+    }
+
+    /// The menu-bar item asked to show the deck. `showDeck` rather than
+    /// `toggleDeck`: a menu click is never a request to close what is on screen.
+    @objc private func menuBarOpened() {
+        showDeck()
     }
 
     @objc private func openSettingsRequested() {

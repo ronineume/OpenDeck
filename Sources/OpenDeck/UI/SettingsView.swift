@@ -13,6 +13,10 @@ final class SettingsViewModel: ObservableObject {
     @Published var statusMessage: String?
     @Published var wallpaperDetected: String?
     @Published var importMessage: String?
+    /// The Dock's own corner actions, read once per refresh rather than on every
+    /// redraw. Empty when the domain cannot be read, which reads as "no conflict"
+    /// — a permission problem must not manufacture a warning.
+    @Published var systemHotCorners: [String: Any] = [:]
 
     private var timer: Timer?
     private var recorderMonitor: Any?
@@ -36,6 +40,7 @@ final class SettingsViewModel: ObservableObject {
         hasFullDiskAccess = Permissions.hasFullDiskAccess
         pinchRunning = PinchMonitor.shared.isRunning
         launchpadKeyRunning = LaunchpadKeyMonitor.shared.isRunning
+        systemHotCorners = HotCornerConflict.systemCornerDefaults()
     }
 
     func refreshWallpaperSummary() {
@@ -185,6 +190,16 @@ struct SettingsView: View {
 
     private var layoutSection: some View {
         Section2("Layout") {
+            Picker("Grid", selection: $settings.gridPreset) {
+                ForEach(GridPreset.allCases) { preset in
+                    Text(preset.label).tag(preset)
+                }
+            }
+            .pickerStyle(.menu)
+            Text("Columns × rows per page. A display too small for the chosen shape falls back to one that fits rather than clipping icons.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Picker("Sort By", selection: $store.sortKey) {
                 ForEach(SortKey.allCases) { key in
                     Text(key.label).tag(key)
@@ -228,11 +243,15 @@ struct SettingsView: View {
 
             Toggle("Show app names", isOn: $settings.showLabels)
 
-            Picker("When reopening", selection: $settings.resumeLastPage) {
-                Text("Resume where I left off").tag(true)
-                Text("Return to the main page").tag(false)
+            Picker("When reopening", selection: $settings.returnToHome) {
+                ForEach(ReturnToHome.allCases) { policy in
+                    Text(policy.label).tag(policy)
+                }
             }
             .pickerStyle(.menu)
+            Text("With a timed option, the saved page is used only while the deck was closed for less than that long — so a deck left alone for a day still opens at home.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             if store.sortKey == .manual {
                 Text("Drag icons to reorder. Dropping one app onto another creates a folder.")
@@ -247,6 +266,13 @@ struct SettingsView: View {
 
     // MARK: - Wallpaper
 
+    /// Whether a system material is drawing the backdrop right now, which is the
+    /// only case the glass tier can have any effect in.
+    private var usesGlassMaterial: Bool {
+        settings.backdropMode == .glass
+            || (settings.backdropMode == .custom && settings.pinnedWallpaperPath == nil)
+    }
+
     private var wallpaperSection: some View {
         Section2("Backdrop") {
             Picker("Style", selection: $settings.backdropMode) {
@@ -259,6 +285,20 @@ struct SettingsView: View {
             Text(settings.backdropMode.detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            // Only meaningful when a system material is actually in play: `.glass`
+            // always, `.custom` only until an image is pinned.
+            if usesGlassMaterial {
+                Picker("Glass", selection: $settings.glassMaterial) {
+                    ForEach(GlassMaterial.allCases) { tier in
+                        Text(tier.label).tag(tier)
+                    }
+                }
+                .pickerStyle(.menu)
+                Text("How heavy the frosted layer is. This is a system material: the window server composites your real desktop through it, so it follows a shuffling wallpaper on its own — the desktop picture is never read back and blurred by hand.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             HStack {
                 Text("Dim")
@@ -379,12 +419,26 @@ struct SettingsView: View {
                 NotificationCenter.default.post(name: .deckHotCornerChanged, object: nil)
             }
             if settings.hotCorner.isEnabled {
-                Text("System Settings → Desktop & Dock → Hot Corners can fight with this. A corner only opens the deck; it never closes one already on screen.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                if HotCornerConflict.systemClaims(settings.hotCorner, in: vm.systemHotCorners) {
+                    Text("Desktop & Dock already assigns an action to this corner, so the system action and the deck will both fire. Pick another corner, or clear the system one in System Settings → Desktop & Dock → Hot Corners.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("No system hot corner is assigned to this corner, so nothing will fight with it. A corner only opens the deck; it never closes one already on screen.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Toggle("Hide the Dock while the deck is open", isOn: $settings.hideDock)
+
+            Toggle("Show a menu bar icon", isOn: $settings.showMenuBarIcon)
+                .onChange(of: settings.showMenuBarIcon) { _, _ in
+                    NotificationCenter.default.post(name: .deckMenuBarIconChanged, object: nil)
+                }
+            Text("Adds a small grid icon to the menu bar with Open, Settings and Quit — handy for a windowless overlay. Off by default, since the app already has a Dock icon.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -525,6 +579,11 @@ extension Notification.Name {
     static let deckPinchChanged = Notification.Name("OpenDeck.pinchChanged")
     static let deckLaunchpadKeyChanged = Notification.Name("OpenDeck.launchpadKeyChanged")
     static let deckHotCornerChanged = Notification.Name("OpenDeck.hotCornerChanged")
+    /// Posted when the menu-bar icon preference flips.
+    static let deckMenuBarIconChanged = Notification.Name("OpenDeck.menuBarIconChanged")
+    /// Posted by the menu-bar item, asking the app to show the deck. Routed
+    /// through a notification so the status item never owns the deck window.
+    static let deckMenuBarOpen = Notification.Name("OpenDeck.menuBarOpen")
     /// Posted when the deck is shown, asking for a throttled rescan of the
     /// application folders (a safety net for a missed FSEvents event).
     static let deckRescanRequested = Notification.Name("OpenDeck.rescanRequested")

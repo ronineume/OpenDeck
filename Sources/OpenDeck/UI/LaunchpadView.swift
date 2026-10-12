@@ -22,7 +22,8 @@ struct LaunchpadView: View {
                 mode: settings.backdropMode,
                 dim: settings.dimStrength,
                 customImagePath: settings.pinnedWallpaperPath,
-                blurRadius: settings.blurRadius
+                blurRadius: settings.blurRadius,
+                glassMaterial: settings.glassMaterial
             )
             // Clicking empty space dismisses, as Launchpad does.
             .contentShape(Rectangle())

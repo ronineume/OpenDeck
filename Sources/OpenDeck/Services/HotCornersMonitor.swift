@@ -101,3 +101,46 @@ final class HotCornersMonitor {
         }
     }
 }
+
+/// Whether the system has already claimed the corner the user picked.
+///
+/// Desktop & Dock lets each of the four corners carry its own action. When one
+/// of them is taken, the system action and our monitor both fire — the deck
+/// lands on top of whatever the system just did, and neither side is obviously
+/// at fault. We cannot ask the system to stand down, so the honest thing is to
+/// say so in Settings instead of leaving the user to work it out.
+enum HotCornerConflict {
+    /// The `com.apple.dock` key naming each corner's action.
+    static func key(for corner: HotCorner) -> String? {
+        switch corner {
+        case .off: return nil
+        case .topLeft: return "wvous-tl-corner"
+        case .topRight: return "wvous-tr-corner"
+        case .bottomLeft: return "wvous-bl-corner"
+        case .bottomRight: return "wvous-br-corner"
+        }
+    }
+
+    /// Whether `corner` has a system action assigned, read from a corner
+    /// preference dictionary.
+    ///
+    /// Pure, and takes the dictionary rather than reaching for it: the self-test
+    /// must neither depend on nor disturb the real Dock preferences, and the
+    /// settings window reads them once per refresh instead of per redraw.
+    static func systemClaims(_ corner: HotCorner, in cornerDefaults: [String: Any]) -> Bool {
+        guard let key = key(for: corner) else { return false }
+        // macOS stores `0` for "no action"; anything else is a live action.
+        if let value = cornerDefaults[key] as? Int { return value != 0 }
+        if let value = cornerDefaults[key] as? NSNumber { return value.intValue != 0 }
+        return false
+    }
+
+    /// The real Dock corner preferences, or an empty dictionary when they cannot
+    /// be read. An unreadable domain reads as "no conflict", so a permission or
+    /// sandbox problem degrades to silence rather than to a false warning.
+    static func systemCornerDefaults() -> [String: Any] {
+        guard let dock = UserDefaults(suiteName: "com.apple.dock") else { return [:] }
+        return dock.dictionaryRepresentation()
+    }
+}
+

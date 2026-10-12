@@ -60,6 +60,8 @@ final class DeckSettings: ObservableObject {
         static let dimStrength = "dimStrength"
         static let blurRadius = "blurRadius"
         static let pinnedWallpaperPath = "pinnedWallpaperPath"
+        static let glassMaterial = "glassMaterial"
+        static let gridPreset = "gridPreset"
         static let hotKeyCode = "hotKeyCode"
         static let hotKeyModifiers = "hotKeyModifiers"
         static let hotKeyEnabled = "hotKeyEnabled"
@@ -69,9 +71,14 @@ final class DeckSettings: ObservableObject {
         static let showLabels = "showLabels"
         static let hotCorner = "hotCorner"
         static let hideDock = "hideDock"
+        static let returnToHome = "returnToHome"
+        /// The old boolean this replaced. Still **read** — see
+        /// `migratedReturnToHome` — but never written.
         static let resumeLastPage = "resumeLastPage"
         static let lastPage = "lastPage"
+        static let lastPageLeftAt = "lastPageLeftAt"
         static let startAtLogin = "startAtLogin"
+        static let showMenuBarIcon = "showMenuBarIcon"
     }
 
     /// Named `defaults` on purpose: every existing call site reads exactly as it
@@ -102,7 +109,12 @@ final class DeckSettings: ObservableObject {
         didSet { defaults.set(dimStrength, forKey: Key.dimStrength) }
     }
 
-    /// Blur applied to a custom backdrop image.
+    /// Blur applied to a backdrop image the user pinned themselves.
+    ///
+    /// Deliberately applies to the **pinned image only**. The desktop picture is
+    /// never blurred here — the `.glass` backdrop gets its frost from the system
+    /// material instead (see `GlassMaterial`), which stays in sync with a
+    /// wallpaper the system is free to change.
     @Published var blurRadius: Double {
         didSet { defaults.set(blurRadius, forKey: Key.blurRadius) }
     }
@@ -110,6 +122,20 @@ final class DeckSettings: ObservableObject {
     /// Image used by `.custom`.
     @Published var pinnedWallpaperPath: String? {
         didSet { defaults.set(pinnedWallpaperPath, forKey: Key.pinnedWallpaperPath) }
+    }
+
+    /// Which frosted-glass tier the backdrop uses.
+    @Published var glassMaterial: GlassMaterial {
+        didSet { defaults.set(glassMaterial.rawValue, forKey: Key.glassMaterial) }
+    }
+
+    /// How many columns and rows a page offers.
+    ///
+    /// Read by the window controller each time the deck is shown, so a change
+    /// takes effect on the next open — and flows through `DeckStore.metrics`,
+    /// whose `didSet` repacks the pages when the capacity differs.
+    @Published var gridPreset: GridPreset {
+        didSet { defaults.set(gridPreset.rawValue, forKey: Key.gridPreset) }
     }
 
     @Published var hotKeySpec: HotKeySpec? {
@@ -144,10 +170,13 @@ final class DeckSettings: ObservableObject {
         didSet { defaults.set(hotCorner.rawValue, forKey: Key.hotCorner) }
     }
 
-    /// Resume on the page you left off on, instead of returning to page one.
-    /// LaunchOS exposes this as "Saved State" vs "Return To Main Page".
-    @Published var resumeLastPage: Bool {
-        didSet { defaults.set(resumeLastPage, forKey: Key.resumeLastPage) }
+    /// How long the deck remembers the page it was on.
+    ///
+    /// Supersedes the old `resumeLastPage` boolean, which could only say "always
+    /// resume" or "never resume". Read by the window controller every time the
+    /// deck is shown.
+    @Published var returnToHome: ReturnToHome {
+        didSet { defaults.set(returnToHome.rawValue, forKey: Key.returnToHome) }
     }
 
     /// The page the deck was last on. Not published: nothing renders from it.
@@ -156,9 +185,36 @@ final class DeckSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Key.lastPage) }
     }
 
+    /// When the deck was last dismissed. Not published: nothing renders from it.
+    ///
+    /// Stored as a `Date`, a type `UserDefaults` round-trips natively, rather
+    /// than as a "now" interval, so a reboot does not poison it.
+    var lastPageLeftAt: Date? {
+        get { defaults.object(forKey: Key.lastPageLeftAt) as? Date }
+        set { defaults.set(newValue, forKey: Key.lastPageLeftAt) }
+    }
+
+    /// The new spelling of the old `resumeLastPage` boolean.
+    ///
+    /// Consulted only when `returnToHome` has never been written. `true` meant
+    /// "resume where I left off", which is now the untimed `never`; `false` meant
+    /// "always go home", which is now `always`.
+    static func migratedReturnToHome(fromLegacyResume legacy: Bool) -> ReturnToHome {
+        legacy ? .never : .always
+    }
+
     /// Hide the Dock while the deck is open, as Launchpad does.
     @Published var hideDock: Bool {
         didSet { defaults.set(hideDock, forKey: Key.hideDock) }
+    }
+
+    /// Whether a status item lives in the menu bar.
+    ///
+    /// Off by default: the app already owns a Dock icon, and an icon appearing in
+    /// the menu bar for every existing install without being asked for would be
+    /// an unrequested change to their screen.
+    @Published var showMenuBarIcon: Bool {
+        didSet { defaults.set(showMenuBarIcon, forKey: Key.showMenuBarIcon) }
     }
 
     @Published var startAtLogin: Bool {
@@ -202,6 +258,8 @@ final class DeckSettings: ObservableObject {
             Key.backdropMode: BackdropMode.glass.rawValue,
             Key.dimStrength: 0.18,
             Key.blurRadius: 26.0,
+            Key.glassMaterial: GlassMaterial.regular.rawValue,
+            Key.gridPreset: GridPreset.macOSDefault.rawValue,
             Key.hotKeyEnabled: true,
             Key.hotKeyCode: Int(HotKeySpec.optionSpace.keyCode),
             Key.hotKeyModifiers: Int(HotKeySpec.optionSpace.modifiers),
@@ -211,22 +269,37 @@ final class DeckSettings: ObservableObject {
             Key.showLabels: true,
             Key.hotCorner: HotCorner.off.rawValue,
             Key.hideDock: false,
+            // `returnToHome` is deliberately NOT registered here: a registered
+            // default is returned by `string(forKey:)` too, which would make the
+            // migration below unable to tell "the user chose this" from "nobody
+            // ever wrote it" — and an install that had `resumeLastPage == false`
+            // would silently lose that choice. The fallback chain in `init`
+            // supplies the default instead. The old boolean stays registered
+            // because the migration reads it.
             Key.resumeLastPage: true,
             Key.lastPage: 0,
             Key.startAtLogin: false,
+            Key.showMenuBarIcon: false,
         ])
 
         backdropMode = BackdropMode(rawValue: defaults.string(forKey: Key.backdropMode) ?? "") ?? .glass
         dimStrength = defaults.double(forKey: Key.dimStrength)
         blurRadius = defaults.double(forKey: Key.blurRadius)
         pinnedWallpaperPath = defaults.string(forKey: Key.pinnedWallpaperPath)
+        glassMaterial = GlassMaterial(rawValue: defaults.string(forKey: Key.glassMaterial) ?? "") ?? .regular
+        gridPreset = GridPreset(rawValue: defaults.string(forKey: Key.gridPreset) ?? "") ?? .macOSDefault
         pinchEnabled = defaults.bool(forKey: Key.pinchEnabled)
         launchpadKeyEnabled = defaults.bool(forKey: Key.launchpadKeyEnabled)
         showHiddenInSearch = defaults.bool(forKey: Key.showHiddenInSearch)
         showLabels = defaults.bool(forKey: Key.showLabels)
         hotCorner = HotCorner(rawValue: defaults.string(forKey: Key.hotCorner) ?? "") ?? .off
         hideDock = defaults.bool(forKey: Key.hideDock)
-        resumeLastPage = defaults.bool(forKey: Key.resumeLastPage)
+        // `returnToHome` wins whenever it has been written; the old boolean is the
+        // fallback, so an install that predates the policy keeps the behaviour it
+        // actually had rather than being reset to a default.
+        returnToHome = ReturnToHome(rawValue: defaults.string(forKey: Key.returnToHome) ?? "")
+            ?? Self.migratedReturnToHome(fromLegacyResume: defaults.bool(forKey: Key.resumeLastPage))
+        showMenuBarIcon = defaults.bool(forKey: Key.showMenuBarIcon)
         startAtLogin = defaults.bool(forKey: Key.startAtLogin)
 
         if defaults.bool(forKey: Key.hotKeyEnabled) {

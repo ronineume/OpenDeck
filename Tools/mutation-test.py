@@ -214,6 +214,99 @@ MUTATIONS = [
         "        guard !isRouting else { return .normal }  // MUTATION: route while key too",
         "revert the key term: every click withdraws the permission, key window or not",
     ),
+    # --- review 29: the LaunchOS-parity backlog (grid presets, glass tiers,
+    # return-to-home policy, hot-corner conflicts, menu bar icon) ---
+    (
+        "M24-grid-preset-columns-collapse",
+        "GridMetrics.swift",
+        "        case .grid10x5, .grid10x6: return 10",
+        "        case .grid10x5, .grid10x6: return 9  // MUTATION: two shapes collapse into one",
+        "revert the widest preset: the picker offers ten columns but seats nine",
+    ),
+    (
+        "M25-grid-default-is-not-what-macos-shipped",
+        "GridMetrics.swift",
+        "    static let macOSDefault: GridPreset = .grid7x5",
+        "    static let macOSDefault: GridPreset = .grid10x6  // MUTATION: change every default",
+        "revert the default: an install that never chose a shape gets a different one",
+    ),
+    (
+        "M26-a-preset-is-never-shrunk-to-fit",
+        "GridMetrics.swift",
+        "        while columns > 4, usableWidth / CGFloat(columns) < 96 { columns -= 1 }",
+        "        while columns > 4, usableWidth / CGFloat(columns) < -1 { columns -= 1 }  // MUTATION",
+        "revert the fit rule: a preset too wide for the display hangs off the edges",
+    ),
+    (
+        "M27-glass-tiers-collapse-onto-a-common-material",
+        "Backdrop.swift",
+        "        case .regular: return .fullScreenUI",
+        "        case .regular: return .hudWindow  // MUTATION: change what the default tier is",
+        "revert the default tier: the backdrop stops matching what it used to render",
+    ),
+    (
+        "M28-a-glass-backdrop-blurs-the-wallpaper",
+        "Backdrop.swift",
+        "        case .glass:\n"
+        "            return .systemMaterial(glassMaterial)",
+        "        case .glass:\n"
+        "            return .picture(blurred: true)  // MUTATION: read the desktop and blur it",
+        "revert the design: the live deck goes back to extracting and blurring the wallpaper",
+    ),
+    (
+        "M29-the-offscreen-render-blurs-the-desktop",
+        "Backdrop.swift",
+        "        if offscreen { return .picture(blurred: false) }",
+        "        if offscreen { return .picture(blurred: true) }  // MUTATION",
+        "revert the offscreen rule: the snapshot fakes the frost by blurring the wallpaper",
+    ),
+    (
+        "M30-a-timed-policy-resumes-with-no-record",
+        "ReturnToHome.swift",
+        "            guard let closedAt else { return false }",
+        "            guard let closedAt else { return true }  // MUTATION: no record counts as recent",
+        "revert the missing-record rule: the deck reopens on a page it cannot date",
+    ),
+    (
+        "M31-a-timed-policy-ignores-its-grace",
+        "ReturnToHome.swift",
+        "            return now.timeIntervalSince(closedAt) <= (grace ?? 0)",
+        "            return true  // MUTATION: a timed tier resumes however long ago",
+        "revert the grace: every timed tier behaves like `never`",
+    ),
+    (
+        "M32-the-old-boolean-migrates-backwards",
+        "DeckSettings.swift",
+        "        legacy ? .never : .always",
+        "        legacy ? .always : .never  // MUTATION: invert the migration",
+        "revert the migration: an upgrade flips the user's saved-state choice",
+    ),
+    (
+        "M33-a-free-corner-reads-as-taken",
+        "HotCornersMonitor.swift",
+        "        if let value = cornerDefaults[key] as? Int { return value != 0 }",
+        "        if let value = cornerDefaults[key] as? Int { return true }  // MUTATION",
+        "revert the action test: a corner with no system action is reported as a conflict",
+    ),
+    (
+        "M34-two-corners-read-the-same-key",
+        "HotCornersMonitor.swift",
+        '        case .topRight: return "wvous-tr-corner"',
+        '        case .topRight: return "wvous-tl-corner"  // MUTATION: collide the corner keys',
+        "revert the key map: one corner's system action is reported for another",
+    ),
+    (
+        "M35-headless-claims-it-installed-an-icon",
+        "MenuBarController.swift",
+        "        guard !AppEnvironment.isHeadless else {\n"
+        "            // A development tool must not put an icon in the user's menu bar.\n"
+        "            return false\n"
+        "        }",
+        "        guard !AppEnvironment.isHeadless else {\n"
+        "            return true  // MUTATION: report success without doing anything\n"
+        "        }",
+        "revert the honesty: a headless run says it put an icon on the user's screen",
+    ),
 ]
 
 

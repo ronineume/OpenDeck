@@ -294,6 +294,167 @@ enum SelfTest {
             check("glass render succeeds", WallpaperProvider.glassWallpaper(for: screen) != nil)
         }
 
+        section("Grid presets (the page shape is the user's to choose)")
+
+        check("eight page shapes are offered", GridPreset.allCases.count == 8,
+              "\(GridPreset.allCases.count)")
+        check("the presets are eight distinct shapes",
+              Set(GridPreset.allCases.map(\.rawValue)).count == 8)
+        check("the default shape is the one macOS shipped",
+              GridPreset.macOSDefault == .grid7x5
+              && GridPreset.macOSDefault.columns == 7
+              && GridPreset.macOSDefault.rows == 5)
+        check("the presets span seven to ten columns",
+              Set(GridPreset.allCases.map(\.columns)) == [7, 8, 9, 10],
+              "\(Set(GridPreset.allCases.map(\.columns)).sorted())")
+        check("the presets span five to six rows",
+              Set(GridPreset.allCases.map(\.rows)) == [5, 6],
+              "\(Set(GridPreset.allCases.map(\.rows)).sorted())")
+        check("every preset is named for its own shape",
+              GridPreset.allCases.allSatisfy { $0.label == "\($0.columns) × \($0.rows)" })
+
+        // The geometry half is pure, so this does not depend on which displays
+        // this machine happens to have attached.
+        let wide = GridMetrics.make(in: CGSize(width: 2560, height: 1440), preset: .grid10x6)
+        check("a large display seats the widest preset",
+              wide.columns == 10 && wide.rows == 6, "\(wide.columns)x\(wide.rows)")
+        check("the widest preset offers the most slots", wide.capacity == 60, "\(wide.capacity)")
+
+        let defaultShaped = GridMetrics.make(in: CGSize(width: 2560, height: 1440))
+        check("asking for nothing yields the 7 x 5 default",
+              defaultShaped.columns == 7 && defaultShaped.rows == 5,
+              "\(defaultShaped.columns)x\(defaultShaped.rows)")
+        check("a wider preset holds more per page than the default",
+              wide.capacity > defaultShaped.capacity,
+              "\(wide.capacity) vs \(defaultShaped.capacity)")
+
+        // A preset is a request: a display that cannot seat it gets a smaller
+        // grid rather than icons hanging off the edge.
+        let small = GridMetrics.make(in: CGSize(width: 1024, height: 640), preset: .grid10x6)
+        check("a preset too big for the display is shrunk, not clipped",
+              small.columns < 10 && small.rows < 6, "\(small.columns)x\(small.rows)")
+        check("a shrunk preset keeps a usable grid",
+              small.columns >= 4 && small.rows >= 3, "\(small.columns)x\(small.rows)")
+        check("the shrunk grid still fits the display's width",
+              CGFloat(small.columns) * small.cellWidth
+              + CGFloat(small.columns - 1) * GridMetrics.hSpacing
+              <= 1024 - GridMetrics.sideMargin * 2,
+              "\(CGFloat(small.columns) * small.cellWidth + CGFloat(small.columns - 1) * GridMetrics.hSpacing) vs 864")
+        check("the shrunk grid still fits the display's height",
+              CGFloat(small.rows) * small.cellHeight
+              + CGFloat(small.rows - 1) * GridMetrics.vSpacing
+              <= 640 - GridMetrics.chromeHeight,
+              "\(CGFloat(small.rows) * small.cellHeight + CGFloat(small.rows - 1) * GridMetrics.vSpacing) vs 430")
+
+        section("Glass tiers (a system material, never a blurred wallpaper)")
+
+        check("five tiers are offered", GlassMaterial.allCases.count == 5,
+              "\(GlassMaterial.allCases.count)")
+        check("the tiers are five distinct materials",
+              Set(GlassMaterial.allCases.map { $0.material.rawValue }).count == 5)
+        check("the default tier keeps the material the backdrop already used",
+              GlassMaterial.regular.material == .fullScreenUI)
+        check("every tier carries its own name",
+              Set(GlassMaterial.allCases.map(\.label)).count == 5)
+
+        // The rule this whole design exists for: the live deck gets its frost
+        // from a system material, which samples the real desktop behind the
+        // window. Nothing reads the desktop picture back and blurs it.
+        check("a glass backdrop is a system material, not a blurred picture",
+              BackdropView.render(mode: .glass, customImagePath: nil, blurRadius: 26,
+                                  glassMaterial: .thick, offscreen: false) == .systemMaterial(.thick))
+        check("the chosen tier is the one that gets used",
+              BackdropView.render(mode: .glass, customImagePath: nil, blurRadius: 26,
+                                  glassMaterial: .ultraThin, offscreen: false) == .systemMaterial(.ultraThin))
+        check("desktop mode draws nothing of ours at all",
+              BackdropView.render(mode: .desktop, customImagePath: nil, blurRadius: 26,
+                                  glassMaterial: .regular, offscreen: false) == .liveDesktop)
+        check("custom mode with no image pinned falls back to the material",
+              BackdropView.render(mode: .custom, customImagePath: nil, blurRadius: 26,
+                                  glassMaterial: .regular, offscreen: false) == .systemMaterial(.regular))
+        check("a pinned image is drawn, and blurred only while the slider is up",
+              BackdropView.render(mode: .custom, customImagePath: "/tmp/pinned.png", blurRadius: 26,
+                                  glassMaterial: .regular, offscreen: false) == .picture(blurred: true)
+              && BackdropView.render(mode: .custom, customImagePath: "/tmp/pinned.png", blurRadius: 0,
+                                     glassMaterial: .regular, offscreen: false) == .picture(blurred: false))
+        // Offscreen there is no desktop to sample, so the picture stands in for
+        // the material — and is drawn as-is. Blurring it to fake the frost is the
+        // approach this design rejects.
+        check("the offscreen render never blurs the desktop picture",
+              BackdropView.render(mode: .glass, customImagePath: nil, blurRadius: 26,
+                                  glassMaterial: .regular, offscreen: true) == .picture(blurred: false)
+              && BackdropView.render(mode: .desktop, customImagePath: nil, blurRadius: 26,
+                                     glassMaterial: .regular, offscreen: true) == .picture(blurred: false))
+
+        section("Return-to-home policy")
+
+        check("seven policies are offered", ReturnToHome.allCases.count == 7,
+              "\(ReturnToHome.allCases.count)")
+        check("only the five middle tiers carry a grace period",
+              ReturnToHome.allCases.compactMap(\.grace) == [5, 15, 30, 60, 300],
+              "\(ReturnToHome.allCases.compactMap(\.grace))")
+        check("the two untimed tiers are the old boolean, in full",
+              ReturnToHome.always.grace == nil && ReturnToHome.never.grace == nil)
+        check("every policy carries its own wording",
+              Set(ReturnToHome.allCases.map(\.label)).count == 7)
+
+        let now = Date()
+        check("`always` never resumes, however recently the deck was closed",
+              !ReturnToHome.always.resumes(lastPage: 3, closedAt: now.addingTimeInterval(-1), now: now))
+        check("`never` always resumes, however long the deck sat closed",
+              ReturnToHome.never.resumes(lastPage: 3, closedAt: nil, now: now)
+              && ReturnToHome.never.resumes(lastPage: 3, closedAt: now.addingTimeInterval(-86400), now: now))
+        check("a timed tier resumes while inside its grace",
+              ReturnToHome.after1Min.resumes(lastPage: 3, closedAt: now.addingTimeInterval(-30), now: now))
+        check("a timed tier goes home once its grace has passed",
+              !ReturnToHome.after1Min.resumes(lastPage: 3, closedAt: now.addingTimeInterval(-90), now: now))
+        // Stepped a little to either side rather than landing exactly on the
+        // boundary: `Date` is a `Double`, so `now - (now - 30)` is only
+        // approximately 30, and an exact-boundary assertion would be flaky.
+        check("a timed tier straddles its grace the right way round",
+              ReturnToHome.after30Sec.resumes(lastPage: 3, closedAt: now.addingTimeInterval(-29.9), now: now)
+              && !ReturnToHome.after30Sec.resumes(lastPage: 3, closedAt: now.addingTimeInterval(-30.1), now: now))
+        check("a timed tier with no dismissal on record goes home rather than resuming a stale page",
+              !ReturnToHome.after5Min.resumes(lastPage: 3, closedAt: nil, now: now))
+
+        // The old boolean has to keep meaning exactly what it meant, or an
+        // upgrade silently resets a choice the user made.
+        check("the old \"resume where I left off\" becomes the untimed `never`",
+              DeckSettings.migratedReturnToHome(fromLegacyResume: true) == .never)
+        check("the old \"return to the main page\" becomes `always`",
+              DeckSettings.migratedReturnToHome(fromLegacyResume: false) == .always)
+
+        section("Hot corner conflicts (the system may already own that corner)")
+
+        check("each corner maps to the Dock's own key",
+              HotCornerConflict.key(for: .topLeft) == "wvous-tl-corner"
+              && HotCornerConflict.key(for: .topRight) == "wvous-tr-corner"
+              && HotCornerConflict.key(for: .bottomLeft) == "wvous-bl-corner"
+              && HotCornerConflict.key(for: .bottomRight) == "wvous-br-corner"
+              && HotCornerConflict.key(for: .off) == nil)
+        check("a corner with a system action is reported as taken",
+              HotCornerConflict.systemClaims(.topLeft, in: ["wvous-tl-corner": 5]))
+        check("a corner the system stores as \"no action\" is free",
+              !HotCornerConflict.systemClaims(.topLeft, in: ["wvous-tl-corner": 0]))
+        check("a corner the Dock has never written is free",
+              !HotCornerConflict.systemClaims(.bottomRight, in: [:]))
+        check("another corner's action does not leak into this one",
+              !HotCornerConflict.systemClaims(.topRight, in: ["wvous-tl-corner": 5]))
+        check("`off` can never conflict",
+              !HotCornerConflict.systemClaims(.off, in: ["wvous-tl-corner": 5]))
+
+        section("Menu bar icon (a tool must not put one on the user's screen)")
+
+        // The self-test itself runs headless, so this exercises the real guard
+        // under real conditions rather than a simulated flag.
+        check("asking for an icon while headless installs nothing, and says so",
+              MenuBarController.shared.apply(enabled: true) == false
+              && MenuBarController.shared.isInstalled == false)
+        check("asking again changes nothing and still never claims success",
+              MenuBarController.shared.apply(enabled: true) == false
+              && MenuBarController.shared.apply(enabled: false) == false
+              && MenuBarController.shared.isInstalled == false)
+
         section("Hot key specs")
         check("F4 displays as F4", HotKeySpec.f4.displayString == "F4", HotKeySpec.f4.displayString)
         check("⌥Space shows modifier + key",

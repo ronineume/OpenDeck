@@ -81,12 +81,16 @@ final class LaunchpadWindowController {
 
     func show(on screen: NSScreen) {
         // Rebuilding is cheap and picks up a possibly different screen geometry.
-        if isVisible { hide(immediately: true) }
+        // Not a dismissal: the deck is being replaced, not put away, and stamping
+        // `lastPageLeftAt` here would make every re-show look like it happened a
+        // moment after the last one — so a timed `ReturnToHome` policy would
+        // always resume.
+        if isVisible { hide(immediately: true, recordDismissal: false) }
 
-        let metrics = GridMetrics.make(for: screen)
+        let metrics = GridMetrics.make(for: screen, preset: DeckSettings.shared.gridPreset)
         store.metrics = metrics
         vm.reset()
-        // "Saved State": reopen on the page the user left off on.
+        // Reopen on the page the user left off on, when the policy says to.
         //
         // Only the *request* is published here — `paging` is deliberately left
         // alone. The page count is known at this point but the scroll view does
@@ -94,8 +98,11 @@ final class LaunchpadWindowController {
         // grid it has not moved to, and `PagesScroller` adopts that first report
         // as the user's, overwriting the jump before it lands. The grid consumes
         // this value on appear and clamps it there (see `PageJumpGuard`).
-        if DeckSettings.shared.resumeLastPage {
-            vm.jumper.target = DeckSettings.shared.lastPage
+        let settings = DeckSettings.shared
+        if settings.returnToHome.resumes(lastPage: settings.lastPage,
+                                         closedAt: settings.lastPageLeftAt,
+                                         now: Date()) {
+            vm.jumper.target = settings.lastPage
         }
         vm.dismiss = { [weak self] in self?.hide() }
         vm.openSettings = {
@@ -152,13 +159,17 @@ final class LaunchpadWindowController {
     ///   - deactivate: hand focus back to the previous app. Must be false when
     ///     another window of ours (settings) is about to be shown, otherwise
     ///     `NSApp.hide` fires afterwards and hides that window too.
+    ///   - recordDismissal: stamp "the user put the deck away just now", which is
+    ///     what a timed `ReturnToHome` policy measures against. False only for
+    ///     the internal teardown `show` performs before rebuilding.
     ///   - then: runs after the fade-out completes.
-    func hide(immediately: Bool = false, deactivate: Bool = true, then completion: (() -> Void)? = nil) {
+    func hide(immediately: Bool = false, deactivate: Bool = true, recordDismissal: Bool = true, then completion: (() -> Void)? = nil) {
         guard let window, isVisible else {
             completion?()
             return
         }
         isVisible = false
+        if recordDismissal { DeckSettings.shared.lastPageLeftAt = Date() }
         removeKeyMonitor()
         // Restore the Dock before we hand focus back.
         NSApp.presentationOptions = []

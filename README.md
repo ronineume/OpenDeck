@@ -11,14 +11,16 @@ assets or strings were taken from any existing app.
 ## What it does
 
 - A full-screen overlay on the display your pointer is on, above all windows, over your
-  real wallpaper (with an optional frosted-glass treatment)
-- A 7 × 5 icon grid with horizontal paging, live search, folders, and drag to reorder
+  real wallpaper — five system glass materials, each compositing the live desktop
+- An icon grid in eight presets (7–10 columns × 5–6 rows) with horizontal paging, live
+  search, folders, and drag to reorder
 - Imports your old Launchpad layout, pages and folders included
 - Opens from a recorded hot key, F4, the keyboard's Launchpad key, a pinch, or a screen
-  corner
+  corner — and says so when that corner is already a system hot corner
+- A menu bar icon, off until you ask for it
 - Uninstalls leftovers: scans 12 `~/Library` locations and moves matches to the Trash
-- Rescans with FSEvents when apps are installed or removed, and can resume on the page
-  you left off on
+- Rescans with FSEvents when apps are installed or removed, and reopens on the page you
+  left off on — or on the first page, after a delay you choose
 - Right-click any icon for Open, Quit, Force Quit, Show in Finder, Get Info, Hide,
   Uninstall
 
@@ -45,7 +47,7 @@ avoids macro-backed property wrappers (`@State`, `@Observable`) and keeps its st
 ## Verify
 
 ```sh
-./build/OpenDeck.app/Contents/MacOS/OpenDeck --selftest    # 299 headless checks
+./build/OpenDeck.app/Contents/MacOS/OpenDeck --selftest    # 343 headless checks
 ./build/OpenDeck.app/Contents/MacOS/OpenDeck --bench 60    # page-switch timings
 ```
 

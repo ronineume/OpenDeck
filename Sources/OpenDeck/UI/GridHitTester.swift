@@ -68,4 +68,28 @@ struct GridHitTester {
             y: origin.y + CGFloat(row) * (metrics.cellHeight + GridMetrics.vSpacing) + metrics.cellHeight / 2
         )
     }
+
+    /// Whether `point` lies on the **tile** — the icon square a merge hover
+    /// targets — of the slot `index` resolves to. The tile is an `iconSize`
+    /// square, horizontally centred in its cell and lifted by a quarter of the
+    /// label band (the label takes the space under the icon). A point in the
+    /// cell margin is a potential insertion point, not a merge (report 45) —
+    /// and `DragState` only honours it once the tile has been crossed. Pure, so
+    /// the merge/insert boundary is pinned without a window.
+    func overTile(at point: CGPoint, index: Int) -> Bool {
+        guard index >= 0, index < targets else { return false }
+        let local = CGPoint(x: point.x - origin.x, y: point.y - origin.y)
+        let column = index % max(metrics.columns, 1)
+        let row = index / max(metrics.columns, 1)
+        let lift = (metrics.cellHeight - metrics.iconSize) / 4
+        let tile = CGRect(
+            x: CGFloat(column) * (metrics.cellWidth + GridMetrics.hSpacing)
+                + (metrics.cellWidth - metrics.iconSize) / 2,
+            y: CGFloat(row) * (metrics.cellHeight + GridMetrics.vSpacing)
+                + (metrics.cellHeight - metrics.iconSize) / 2 - lift,
+            width: metrics.iconSize,
+            height: metrics.iconSize
+        )
+        return tile.contains(local)
+    }
 }

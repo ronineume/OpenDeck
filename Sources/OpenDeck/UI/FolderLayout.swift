@@ -2,19 +2,23 @@ import Foundation
 
 /// The one place that decides how many columns a folder panel uses.
 ///
-/// This used to live only inside `FolderOverlayView`, while the keyboard
-/// navigation in `LaunchpadViewModel` hard-coded four columns. For any folder
-/// that is not ten-plus apps those disagreed, so ↑/↓ inside a folder skipped or
-/// mis-aligned rows. Both the view and the view model now read the rule from
-/// here, so the two can never drift apart again.
+/// LaunchOS lays a folder out with the **page's column count** — its
+/// `AppState::columnsPerPage`, read in the folder-present path (the "one row is
+/// seven" a user sees on the default grid; a user who picks 8×5 or 10×6 gets 8
+/// or 10 per row). The panel is therefore **fixed in width** and its icons
+/// **left-align**; as a folder gains members the panel only grows **downward**
+/// (more rows) — it never widens, and a two-app folder is a wide panel with two
+/// icons at the top-left.
+///
+/// This replaced the earlier count-driven 1/2/3/4 rule, which made the panel
+/// *narrower* for small folders — the opposite of LaunchOS. The keyboard
+/// navigation in `LaunchpadViewModel` reads the same rule, so ↑/↓ stay
+/// aligned with the drawn grid.
 enum FolderLayout {
-    /// Column count for a folder holding `count` apps.
-    static func columns(forMemberCount count: Int) -> Int {
-        switch count {
-        case 0 ... 1: return 1
-        case 2 ... 4: return 2
-        case 5 ... 9: return 3
-        default: return 4
-        }
+    /// Columns for a folder panel: the page's column count, clamped to at least
+    /// one. `memberCount` is accepted (and documented) but deliberately does not
+    /// change the width — a folder keeps the page's columns whatever its size.
+    static func columns(pageColumns: Int, memberCount: Int = 0) -> Int {
+        max(pageColumns, 1)
     }
 }

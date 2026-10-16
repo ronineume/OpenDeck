@@ -33,6 +33,14 @@ enum AppScanner {
 
                 guard let info = makeAppInfo(url: url) else { continue }
 
+                // The deck is a launcher, not a window onto itself. Excluded by
+                // bundle id rather than by path, because the path only avoids a
+                // collision by accident: a build left in `build/` sits outside
+                // every scan root, but the same bundle copied into /Applications
+                // does not, and would then list itself.
+                guard shouldInclude(bundleID: info.bundleID,
+                                    ownBundleID: Bundle.main.bundleIdentifier) else { continue }
+
                 // Prefer the first occurrence of a given bundle id.
                 if let bid = info.bundleID {
                     if seenBundleIDs.contains(bid) { continue }
@@ -46,6 +54,15 @@ enum AppScanner {
         return result.sorted {
             $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
+    }
+
+    /// Whether an app found on disk belongs in the deck.
+    ///
+    /// Exactly one thing is excluded, and it is OpenDeck itself. Apps that report
+    /// no bundle id are kept, as they always have been.
+    static func shouldInclude(bundleID: String?, ownBundleID: String?) -> Bool {
+        guard let bundleID, let ownBundleID else { return true }
+        return bundleID != ownBundleID
     }
 
     /// Enumerate `.app` bundles up to two levels deep under `root`.
@@ -90,17 +107,21 @@ enum AppScanner {
         // the standard Applications folders with that flag set), and dropping
         // them both diverged from Launchpad and made layout imports lose apps.
 
-        // Some bundles ship an empty CFBundleDisplayName/CFBundleName, so an
-        // empty string must fall through to the filename too.
-        let candidates = [
-            info["CFBundleDisplayName"] as? String,
-            info["CFBundleName"] as? String,
-            url.deletingPathExtension().lastPathComponent,
-        ]
-        let name = candidates
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first { !$0.isEmpty }
-            ?? url.deletingPathExtension().lastPathComponent
+        // The caption LaunchOS would draw (reports 50 + 55). The **localised**
+        // plist name comes first — LaunchOS's own database displays it
+        // (`ZNAME` = 微信 for WeChat, whose base plist says `WeChat`) — then
+        // the file manager's display name, then the plist keys as fallbacks
+        // for a bundle whose names cannot be resolved. Some bundles ship an
+        // empty CFBundleDisplayName/CFBundleName, so an empty string must fall
+        // through to the filename too.
+        let fallback = url.deletingPathExtension().lastPathComponent
+        let name = AppNaming.displayName(
+            localizedDisplayName: AppNaming.localizedDisplayName(bundle: bundle),
+            finderDisplayName: FileManager.default.displayName(atPath: url.path),
+            bundleDisplayName: info["CFBundleDisplayName"] as? String,
+            bundleName: info["CFBundleName"] as? String,
+            fallback: fallback
+        )
 
         // One metadata read backs "date added" and the bundle half of the
         // freshness signature `IconCache` compares to notice an app updated in

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 
 /// Headless verification of the logic that cannot be eyeballed in a screenshot.
 ///
@@ -149,6 +150,406 @@ enum SelfTest {
             }
         } else {
             check("at least two apps for folder test", false)
+        }
+
+        section("Ungroup placement (the folder's own page, at its end)")
+        // LaunchOS's own wording: "Ungrouped apps are added to the end of their
+        // original page. If the page is full, they continue onto the next page
+        // and may shift apps on later pages." The page is deliberately tiny (2
+        // slots) so a full one is easy to build and the spill is forced.
+        let ungroupURL = tempURL.deletingLastPathComponent()
+            .appendingPathComponent("opendeck-selftest-ungroup-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: ungroupURL) }
+        let up = DeckStore(storeURL: ungroupURL)
+        up.metrics = GridMetrics(columns: 2, rows: 1, iconSize: 100, cellWidth: 150, cellHeight: 150)
+        let upIDs = Array(up.visibleApps.prefix(4)).map(\.id)
+        if upIDs.count == 4 {
+            up.makeFolder(dropping: upIDs[0], onto: upIDs[1])
+            if let fid = up.folders.values.first(where: { $0.appIDs.contains(upIDs[0]) })?.id {
+                // Page 0 is exactly full (folder + one loose app); page 1 holds one.
+                up.pages = [[.folder(fid), .app(upIDs[2])], [.app(upIDs[3])]]
+                check("ungroup probe: the folder occupies page 0's first slot",
+                      up.locate(.folder(fid)) == IndexPath(item: 0, section: 0))
+                up.ungroup(fid)
+                let spilled = up.pages.prefix(2).flatMap { $0 }
+                check("ungroup removes the folder and its slot",
+                      up.folder(fid) == nil
+                      && !up.pages.flatMap { $0 }.contains { if case .folder = $0 { return true } else { return false } })
+                check("the members land on the folder's page, or the one it spilled onto",
+                      spilled.contains(.app(upIDs[0])) && spilled.contains(.app(upIDs[1])),
+                      "\(up.pages.map(\.count))")
+                check("the page's own items stay ahead of the members",
+                      up.pages.first?.first == .app(upIDs[2]), "\(up.pages.map(\.count))")
+                check("a full page spills onto the next one (\"they continue onto the next page\")",
+                      up.pages.count == 3, "\(up.pages.map(\.count))")
+                check("and shifts the page that was already there (\"may shift apps on later pages\")",
+                      up.pages.last == [.app(upIDs[3])], "\(up.pages.map(\.count))")
+            } else {
+                check("ungroup probe: folder created", false)
+            }
+        } else {
+            check("at least four apps for the ungroup test", false)
+        }
+
+        section("Ungroup All Folders (one batch, grid order)")
+        // LaunchOS ships "Ungroup All Folders"; its own description string for
+        // the single-ungroup rule ("added to the end of their original page…
+        // continue onto the next page") applies per folder. The batch must be
+        // deterministic: folders dissolve in grid order, so the cascade below
+        // is pinned exactly — with capacity 2, f1(a,b) on page 0 and f2(c,d)
+        // on page 1 the final layout is [[e,a],[b,c],[d,f]], and f3(g,h) —
+        // deliberately NOT on the grid — dissolves last onto a fresh page.
+        let uaURL = tempURL.deletingLastPathComponent()
+            .appendingPathComponent("opendeck-selftest-ungroupall-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: uaURL) }
+        let ua = DeckStore(storeURL: uaURL)
+        ua.metrics = GridMetrics(columns: 2, rows: 1, iconSize: 100, cellWidth: 150, cellHeight: 150)
+        let uaIDs = Array(ua.visibleApps.prefix(8)).map(\.id)
+        if uaIDs.count == 8 {
+            let a = uaIDs[0], b = uaIDs[1], c = uaIDs[2], d = uaIDs[3]
+            let e = uaIDs[4], f = uaIDs[5], g = uaIDs[6], h = uaIDs[7]
+            ua.makeFolder(dropping: a, onto: b)
+            ua.makeFolder(dropping: c, onto: d)
+            ua.makeFolder(dropping: g, onto: h)
+            if let f1 = ua.folders.values.first(where: { $0.appIDs.contains(a) })?.id,
+               let f2 = ua.folders.values.first(where: { $0.appIDs.contains(c) })?.id,
+               let f3 = ua.folders.values.first(where: { $0.appIDs.contains(g) })?.id {
+                ua.pages = [[.folder(f1), .app(e)], [.folder(f2), .app(f)]] // f3 off-grid on purpose
+                let tokenBefore = ua.mergeFlash?.token ?? 0
+                ua.ungroupAllFolders()
+                check("ungroup-all dissolves every folder, on-grid or not",
+                      ua.folders.isEmpty
+                      && !ua.pages.flatMap { $0 }.contains { if case .folder = $0 { return true } else { return false } })
+                // `makeFolder(dropping: X, onto: Y)` stores members as [Y, X], and
+                // `enforceCapacity` splits an over-full page *in place* (no cascade
+                // into the next page). So f1 (members [b, a]) on page 0 leaves
+                // [e, b] there with `a` split onto page 1; f2 (members [d, c])
+                // then lands [f, d] / [c]; the off-grid f3 (members [h, g])
+                // appends to the grid end. Dissolving in any other order produces
+                // a different layout, which is what pins the grid order.
+                check("ungroup-all lands the cascade exactly (grid order is deterministic)",
+                      ua.pages == [[.app(e), .app(b)], [.app(a)], [.app(f), .app(d)], [.app(c), .app(h)], [.app(g)]],
+                      "\(ua.pages)")
+                check("ungroup-all syncs customOrder to the final layout",
+                      ua.customOrder == [e, b, a, f, d, c, h, g], "\(ua.customOrder)")
+                check("ungroup-all flashes a release per folder, last one wins",
+                      ua.mergeFlash?.kind == .released
+                      && ua.mergeFlash?.folderID == f3
+                      && ua.mergeFlash?.token == tokenBefore + 3,
+                      "\(String(describing: ua.mergeFlash))")
+            } else {
+                check("ungroup-all probe: three folders created", false)
+            }
+        } else {
+            check("at least eight apps for the ungroup-all test", false)
+        }
+        // No folders → no-op (the guard cannot be mutation-killed: with an
+        // empty folder set the batched pass changes nothing either way, so —
+        // report 46 precedent — no mutation is registered for it).
+        let uaEmpty = DeckStore(storeURL: uaURL)
+        let beforePages = uaEmpty.pages
+        uaEmpty.ungroupAllFolders()
+        check("ungroup-all with no folders is a no-op", uaEmpty.pages == beforePages)
+
+        section("Reorganize Layout engine (LaunchOS Pro feature, report 53)")
+        // Pure-engine fixture: eight apps with controlled names and dates.
+        // `addedDate` drives the Date Added sort; `lastUsedDate` the Last Used
+        // one; Apple-ness comes from the bundle id.
+        func probeApp(_ name: String, _ bundle: String, added: Double, used: Double) -> AppInfo {
+            AppInfo(path: "/Applications/\(name).app", bundleID: bundle, name: name,
+                    addedDate: Date(timeIntervalSince1970: added),
+                    lastUsedDate: Date(timeIntervalSince1970: used))
+        }
+        let apps53: [AppInfo] = [
+            probeApp("Bravo", "com.other.bravo", added: 300, used: 100),
+            probeApp("alpha", "com.other.alpha", added: 100, used: 400),
+            probeApp("Charlie", "com.apple.charlie", added: 200, used: 300),
+            probeApp("delta", "com.other.delta", added: 400, used: 200),
+        ]
+        let idA = apps53[1].id // alpha
+        let idB = apps53[0].id // Bravo
+        let idC = apps53[2].id // Charlie (Apple)
+        let idD = apps53[3].id // delta
+
+        // 1. Name ascending, folders after apps, one list across pages.
+        // NB: the default Apple placement is *after other apps*, so Charlie
+        // (com.apple.*) lands last in every expectation below unless the test
+        // says otherwise.
+        var pages53: [[DeckSlot]] = [[.app(idB), .app(idD)], [.app(idA), .app(idC)]]
+        var r = LayoutOrganizer.organize(pages: pages53, folders: [:], apps: apps53,
+                                         capacity: 2,
+                                         options: OrganizeOptions(sortMethod: .name),
+                                         scopePages: [0, 1])
+        check("reorganize by name ascending, across pages",
+              r.pages == [[.app(idA), .app(idB)], [.app(idD), .app(idC)]], "\(r.pages)")
+        check("reorganize with nothing to append reports zero",
+              r.appendedPages == 0, "\(r.appendedPages)")
+
+        // 2. Descending flips the key (not the name tiebreak).
+        r = LayoutOrganizer.organize(pages: pages53, folders: [:], apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(sortMethod: .name,
+                                                              sortDirection: .descending),
+                                     scopePages: [0, 1])
+        check("reorganize by name descending",
+              r.pages == [[.app(idD), .app(idB)], [.app(idA), .app(idC)]], "\(r.pages)")
+
+        // 3. Date Added uses the bundle date; equal dates fall back to name.
+        r = LayoutOrganizer.organize(pages: pages53, folders: [:], apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(sortMethod: .dateAdded),
+                                     scopePages: [0, 1])
+        check("reorganize by date added ascending (oldest first)",
+              r.pages == [[.app(idA), .app(idB)], [.app(idD), .app(idC)]], "\(r.pages)")
+
+        // 4. Last Used, most recent first (descending).
+        r = LayoutOrganizer.organize(pages: pages53, folders: [:], apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(sortMethod: .lastUsed,
+                                                              sortDirection: .descending),
+                                     scopePages: [0, 1])
+        check("reorganize by last used, most recent first",
+              r.pages == [[.app(idA), .app(idD)], [.app(idB), .app(idC)]], "\(r.pages)")
+
+        // 5. Apple placement: after others by default, before others on request.
+        r = LayoutOrganizer.organize(pages: pages53, folders: [:], apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(appleAppPlacement: .beforeOtherApps),
+                                     scopePages: [0, 1])
+        check("Apple apps before other apps",
+              r.pages == [[.app(idC), .app(idA)], [.app(idB), .app(idD)]], "\(r.pages)")
+
+        // 6. Folder placement: a folder named "Fld" between the apps.
+        var folders53 = [UUID(): AppFolder(id: UUID(), name: "Fld", appIDs: [idA, idD])]
+        let fid53 = folders53.keys.first!
+        pages53 = [[.folder(fid53), .app(idB)], [.app(idC)]]
+        r = LayoutOrganizer.organize(pages: pages53, folders: folders53, apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(folderPlacement: .beforeApps),
+                                     scopePages: [0, 1])
+        check("folder before apps", r.pages.first?.first == .folder(fid53), "\(r.pages)")
+        r = LayoutOrganizer.organize(pages: pages53, folders: folders53, apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(folderPlacement: .afterApps),
+                                     scopePages: [0, 1])
+        check("folder after apps",
+              r.pages.flatMap { $0 }.last == .folder(fid53), "\(r.pages)")
+        r = LayoutOrganizer.organize(pages: pages53, folders: folders53, apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(folderPlacement: .mixedWithApps),
+                                     scopePages: [0, 1])
+        // "Fld" sorts after "Bravo"/"Charlie" by localized name, so the
+        // three-item fixture (folder, Bravo, Charlie) lands Bravo, Charlie, Fld.
+        check("folder mixed with apps by name",
+              r.pages.flatMap { $0 } == [.app(idB), .app(idC), .folder(fid53)],
+              "\(r.pages)")
+
+        // 7. Selected-pages scope leaves the other pages alone.
+        r = LayoutOrganizer.organize(pages: pages53, folders: [:], apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(pageScope: .selectedPages,
+                                                              selectedPages: [1]),
+                                     scopePages: [1])
+        check("selected-pages scope touches only page 1",
+              r.pages[0] == pages53[0], "\(r.pages)")
+
+        // 8. Per-page mode (acrossPages off) sorts each page independently.
+        r = LayoutOrganizer.organize(pages: pages53, folders: [:], apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(acrossPages: false),
+                                     scopePages: [0, 1])
+        check("per-page mode keeps the page split",
+              r.pages.count == 2, "\(r.pages)")
+
+        // 9. Also-sort-in-folders rewrites membership only.
+        folders53[fid53] = AppFolder(id: fid53, name: "Fld", appIDs: [idB, idA])
+        r = LayoutOrganizer.organize(pages: pages53, folders: folders53, apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(alsoSortInFolders: true),
+                                     scopePages: [0, 1])
+        check("also-sort-in-folders rewrites the members",
+              r.folders[fid53]?.appIDs == [idA, idB], "\(String(describing: r.folders[fid53]?.appIDs))")
+
+        // 10. Ungroup-all dissolves the folder into the flat list. Fresh
+        //     folder (alpha + delta, neither a standalone slot — I2) so the
+        //     result can assert "every app exactly once".
+        folders53[fid53] = AppFolder(id: fid53, name: "Fld", appIDs: [idA, idD])
+        pages53 = [[.folder(fid53), .app(idB)], [.app(idC)]]
+        r = LayoutOrganizer.organize(pages: pages53, folders: folders53, apps: apps53, capacity: 2,
+                                     options: OrganizeOptions(ungroupAllFolders: true),
+                                     scopePages: [0, 1])
+        let flat10 = r.pages.flatMap { $0 }.compactMap { slot -> String? in
+            if case .app(let id) = slot { return id }
+            return nil
+        }
+        check("ungroup-all dissolves the folder",
+              r.folders.isEmpty && !r.pages.flatMap { $0 }.contains(.folder(fid53)),
+              "\(r.pages)")
+        check("ungroup-all keeps every member exactly once",
+              flat10.count == 4 && Set(flat10) == Set([idA, idB, idC, idD]), "\(flat10)")
+
+        // 11. Empty scope is a no-op ("Select at least one page").
+        r = LayoutOrganizer.organize(pages: pages53, folders: folders53, apps: apps53,
+                                     capacity: 2, options: OrganizeOptions(), scopePages: [])
+        check("empty scope changes nothing", r.pages == pages53 && r.folders == folders53)
+
+        // 12. Spill: six items across two scope pages of capacity 2 → the
+        //     refill needs a third page; the page after the scope shifts down.
+        let sixApps = apps53 + [probeApp("Echo", "com.other.echo", added: 500, used: 500),
+                                probeApp("foxtrot", "com.other.foxtrot", added: 600, used: 600)]
+        let idE = sixApps[4].id, idF = sixApps[5].id
+        let idZ = probeApp("Zulu", "com.other.zulu", added: 700, used: 700).id
+        // Three items per page — over capacity on purpose, so the scope holds
+        // six items while offering only four slots.
+        let spillPages: [[DeckSlot]] = [[.app(idF), .app(idA), .app(idD)],
+                                        [.app(idB), .app(idE), .app(idC)],
+                                        [.app(idZ)]]
+        r = LayoutOrganizer.organize(pages: spillPages, folders: [:], apps: sixApps, capacity: 2,
+                                     options: OrganizeOptions(), scopePages: [0, 1])
+        check("across-pages refill spills onto a new page",
+              r.pages.count == 4 && r.appendedPages == 1
+              && r.pages.flatMap { $0 } == [.app(idA), .app(idB), .app(idD), .app(idE),
+                                           .app(idF), .app(idC), .app(idZ)],
+              "\(r.pages) appended=\(r.appendedPages)")
+
+        // 13. Store-level: one batch write and a synced customOrder.
+        let orgURL = tempURL.deletingLastPathComponent()
+            .appendingPathComponent("opendeck-selftest-organize-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: orgURL) }
+        let org = DeckStore(storeURL: orgURL)
+        org.metrics = GridMetrics(columns: 2, rows: 1, iconSize: 100, cellWidth: 150, cellHeight: 150)
+        let orgIDs = Array(org.visibleApps.prefix(4)).map(\.id)
+        if orgIDs.count == 4 {
+            org.pages = [[.app(orgIDs[3]), .app(orgIDs[1])], [.app(orgIDs[2]), .app(orgIDs[0])]]
+            org.customOrder = [orgIDs[3], orgIDs[1], orgIDs[2], orgIDs[0]]
+            org.reorganize(with: OrganizeOptions(sortMethod: .name))
+            let flat = org.pages.flatMap { $0 }.compactMap { slot -> String? in
+                if case .app(let id) = slot { return id }
+                return nil
+            }
+            check("store reorganize keeps every app", Set(flat) == Set(orgIDs), "\(flat)")
+            check("store reorganize syncs customOrder",
+                  org.customOrder == flat, "\(org.customOrder)")
+        } else {
+            check("at least four apps for the organize test", false)
+        }
+
+        // The sheet's validation, pure so the rule and the wording stay
+        // together (LaunchOS: "Select at least one page").
+        check("canApply: all pages always applies",
+              ReorganizeRules.canApply(options: OrganizeOptions(), pageCount: 3))
+        check("canApply: selected pages with nothing selected is refused",
+              !ReorganizeRules.canApply(
+                  options: OrganizeOptions(pageScope: .selectedPages, selectedPages: []),
+                  pageCount: 3))
+        check("canApply: selected pages with a selection applies",
+              ReorganizeRules.canApply(
+                  options: OrganizeOptions(pageScope: .selectedPages, selectedPages: [1]),
+                  pageCount: 3))
+        check("canApply: no pages at all is refused",
+              !ReorganizeRules.canApply(options: OrganizeOptions(), pageCount: 0))
+        check("hint: only the empty selection gets the LaunchOS wording",
+              ReorganizeRules.hint(
+                  options: OrganizeOptions(pageScope: .selectedPages, selectedPages: []),
+                  pageCount: 3) == "Select at least one page"
+              && ReorganizeRules.hint(options: OrganizeOptions(), pageCount: 3) == nil)
+        check("scope clamps out-of-range page indices",
+              OrganizeOptions(pageScope: .selectedPages, selectedPages: [0, 99, -1])
+                  .scope(pageCount: 2) == [0],
+              "\(OrganizeOptions(pageScope: .selectedPages, selectedPages: [0, 99, -1]).scope(pageCount: 2))")
+        check("scope: all pages is every page",
+              OrganizeOptions().scope(pageCount: 3) == [0, 1, 2])
+
+        section("customOrder mirrors the layout after every folder mutation")
+        // `save()` persists `customOrder` as its own field rather than deriving it
+        // from `pages`, and `apply(_:)` reads the two back independently. So
+        // nothing heals a stale order on load, and `sorted()` — its only reader —
+        // hands `restartToDefaultOrder` ("Reset Order") an arrangement from
+        // *before* the folder step. Every mutator must re-derive it. These four
+        // are the folder family; `move`/`fillEmptySlots` always did.
+        func mirror(_ s: DeckStore) -> [String] {
+            var seen = Set<String>()
+            var out: [String] = []
+            for page in s.pages {
+                for slot in page {
+                    switch slot {
+                    case .app(let id):
+                        if seen.insert(id).inserted { out.append(id) }
+                    case .folder(let fid):
+                        for member in s.folder(fid)?.appIDs ?? [] where seen.insert(member).inserted {
+                            out.append(member)
+                        }
+                    }
+                }
+            }
+            return out
+        }
+
+        let mirrorURL = tempURL.deletingLastPathComponent()
+            .appendingPathComponent("opendeck-selftest-mirror-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: mirrorURL) }
+        let mirrorStore = DeckStore(storeURL: mirrorURL)
+        mirrorStore.metrics = GridMetrics(columns: 3, rows: 2, iconSize: 100, cellWidth: 150, cellHeight: 150)
+        check("the mirror fixture is in Custom sort, the only reader of customOrder",
+              mirrorStore.sortKey == .manual)
+
+        // Compact on purpose: `check` prints its detail even on PASS, and dumping
+        // the whole order over a hundred installed apps buries the run.
+        func firstDifference(_ lhs: [String], _ rhs: [String]) -> String {
+            guard lhs != rhs else { return "" }
+            for i in 0 ..< max(lhs.count, rhs.count) {
+                let l = i < lhs.count ? lhs[i] : "-"
+                let r = i < rhs.count ? rhs[i] : "-"
+                if l != r {
+                    return "\(max(lhs.count, rhs.count)) entries, first differs at \(i): \(l) vs \(r)"
+                }
+            }
+            return "orders differ"
+        }
+
+        let mirrorIDs = Array(mirrorStore.visibleApps.prefix(4)).map(\.id)
+        if mirrorIDs.count == 4 {
+            let a = mirrorIDs[0], b = mirrorIDs[1], c = mirrorIDs[2], d = mirrorIDs[3]
+
+            // An explicit two-page fixture, so every step really moves a slot.
+            // Relying on the scan order made this hollow: the member `addToFolder`
+            // pulled in happened to land exactly where its own slot had been, so
+            // the stale and the re-derived order agreed (mutation M49 survived).
+            mirrorStore.pages = [[.app(a), .app(b), .app(c)], [.app(d)]]
+            mirrorStore.customOrder = [a, b, c, d]
+            check("the explicit fixture starts in sync",
+                  mirrorStore.customOrder == mirror(mirrorStore),
+                  firstDifference(mirror(mirrorStore), mirrorStore.customOrder))
+
+            // {a, c} takes a's slot on page 0; c's own slot closes up, so the
+            // members end up ahead of b.
+            mirrorStore.makeFolder(dropping: c, onto: a)
+            check("makeFolder re-derives customOrder",
+                  mirrorStore.customOrder == mirror(mirrorStore),
+                  firstDifference(mirror(mirrorStore), mirrorStore.customOrder))
+
+            if let folderID = mirrorStore.folders.values.first(where: { $0.appIDs.contains(a) })?.id {
+                // d leaves the second page for the folder on the first.
+                mirrorStore.addToFolder(d, folder: folderID)
+                check("addToFolder re-derives customOrder",
+                      mirrorStore.customOrder == mirror(mirrorStore),
+                      firstDifference(mirror(mirrorStore), mirrorStore.customOrder))
+
+                mirrorStore.removeFromFolder(d, folder: folderID)
+                check("removeFromFolder re-derives customOrder",
+                      mirrorStore.customOrder == mirror(mirrorStore),
+                      firstDifference(mirror(mirrorStore), mirrorStore.customOrder))
+
+                mirrorStore.ungroup(folderID)
+                check("ungroup re-derives customOrder",
+                      mirrorStore.customOrder == mirror(mirrorStore),
+                      firstDifference(mirror(mirrorStore), mirrorStore.customOrder))
+
+                // The reader, not the field: this is the order "Reset Order" reflows.
+                let laidOut = mirrorStore.pages.flatMap { $0 }.compactMap { slot -> String? in
+                    if case .app(let id) = slot { return id }
+                    return nil
+                }
+                let sortedIDs = mirrorStore.sorted(mirrorStore.visibleApps)
+                    .map(\.id).filter { laidOut.contains($0) }
+                check("the sorted order agrees with the grid after ungrouping",
+                      sortedIDs == laidOut,
+                      firstDifference(sortedIDs, laidOut))
+            } else {
+                check("the mirror fixture built a folder", false)
+            }
+        } else {
+            check("at least four apps for the customOrder mirror test", false)
         }
 
         section("Move")
@@ -455,6 +856,464 @@ enum SelfTest {
               && MenuBarController.shared.apply(enabled: false) == false
               && MenuBarController.shared.isInstalled == false)
 
+        section("Drag gate (reordering is a custom-sort-only gesture)")
+        // LaunchOS's rule, in its own words: "Dragging to reorder is only
+        // available in Custom sort mode." OpenDeck used to accept the drag and
+        // then drop the result on the floor — `syncCustomOrder()` bails out for
+        // every other sort, so the new order was never recorded.
+        check("a drag may begin under the custom sort",
+              DragState.allowsDrag(sortKey: .manual))
+        check("no drag may begin under any other sort",
+              !DragState.allowsDrag(sortKey: .name) && !DragState.allowsDrag(sortKey: .lastUsed))
+        check("the refusal names the custom sort",
+              DragState.reorderLockedMessage.contains("Custom sort mode"))
+
+        // The gate is only half the rule: a refusal that says nothing on screen
+        // is indistinguishable from a deck that is simply broken.
+        let gate = DragState()
+        check("a fresh drag has nothing to say", gate.blockedNotice == nil)
+        gate.refuseBegin(DragState.reorderLockedMessage)
+        check("a refusal puts the reason on screen",
+              gate.blockedNotice == DragState.reorderLockedMessage)
+        gate.clearBlockedNotice()
+        check("starting a real drag clears the refusal", gate.blockedNotice == nil)
+
+        section("Drag edge zones")
+        // Named after LaunchOS's `DragEdgeZone`. Pure geometry, so it is driven by
+        // plain numbers here instead of a window.
+        check("the left band is the leading zone",
+              DragState.edgeZone(x: 0, width: 1000, inset: 70) == .leading
+              && DragState.edgeZone(x: 70, width: 1000, inset: 70) == .leading)
+        check("the right band is the trailing zone",
+              DragState.edgeZone(x: 930, width: 1000, inset: 70) == .trailing
+              && DragState.edgeZone(x: 1000, width: 1000, inset: 70) == .trailing)
+        check("the middle belongs to no zone",
+              DragState.edgeZone(x: 500, width: 1000, inset: 70) == nil)
+        check("one point past a band is outside it",
+              DragState.edgeZone(x: 71, width: 1000, inset: 70) == nil
+              && DragState.edgeZone(x: 929, width: 1000, inset: 70) == nil)
+        check("a deck with no width (or no band) has no zones",
+              DragState.edgeZone(x: 10, width: 0, inset: 70) == nil
+              && DragState.edgeZone(x: 10, width: 1000, inset: 0) == nil)
+
+        section("Drag motion (ported from LaunchOS's display link)")
+        // Every constant here was decoded from `updatePagedDragFrame:`
+        // (`0x10011ca8c`). The assertions pin the *shape* of the ramp as well as
+        // its endpoints, because the endpoints alone would pass for a fixed
+        // factor — and a fixed factor is exactly the misreading report 32 made.
+        check("the approach factor is 0.21 for a 120 Hz frame",
+              DragMotion.alpha(frameDuration: DragMotion.fastestFrame) == 0.21)
+        check("the approach factor is 0.42 for a 60 Hz frame",
+              DragMotion.alpha(frameDuration: DragMotion.referenceFrame) == 0.42)
+        check("a frame slower than 60 Hz does not push past 0.42",
+              DragMotion.alpha(frameDuration: 1.0 / 30.0) == 0.42
+              && DragMotion.alpha(frameDuration: 0.5) == 0.42)
+        check("a frame faster than 120 Hz does not drop below 0.21",
+              DragMotion.alpha(frameDuration: 1.0 / 240.0) == 0.21)
+        // 1/90 s is two thirds of the reference frame, so the ramp gives 0.28.
+        check("the factor ramps linearly between the two ends",
+              abs(DragMotion.alpha(frameDuration: 1.0 / 90.0) - 0.28) < 1e-12,
+              "\(DragMotion.alpha(frameDuration: 1.0 / 90.0))")
+        check("the ramp rises monotonically across the band",
+              stride(from: 0.0, through: 1.0, by: 0.05).allSatisfy { t in
+                  let a = DragMotion.fastestFrame
+                  let b = DragMotion.referenceFrame
+                  let d = a + (b - a) * t
+                  guard d < b else { return true }
+                  let next = a + (b - a) * min(t + 0.05, 1)
+                  return DragMotion.alpha(frameDuration: next) >= DragMotion.alpha(frameDuration: d)
+              })
+        check("the cap is never reached, so it cannot silently bind",
+              DragMotion.alphaCap > DragMotion.alphaReferenceFrame)
+
+        // The one-step behaviour.
+        let settledStep = DragMotion.step(value: 0, goal: 0.05, frameDuration: DragMotion.referenceFrame)
+        check("a step inside the threshold settles", settledStep.settled)
+        check("a settled step lands exactly on the goal, not near it",
+              settledStep.value == 0.05)
+        check("a step at exactly the threshold does not settle",
+              !DragMotion.step(value: 0, goal: DragMotion.settleThreshold,
+                               frameDuration: DragMotion.referenceFrame).settled)
+        let midway = DragMotion.step(value: 0, goal: 100, frameDuration: DragMotion.referenceFrame)
+        check("a step moves toward the goal without overshooting",
+              midway.value > 0 && midway.value < 100, "\(midway.value)")
+        // One 60 Hz frame is a bigger step than two 120 Hz ones, which is what
+        // makes the time constant — and the feel — hold across refresh rates.
+        let once60 = DragMotion.step(value: 0, goal: 100, frameDuration: DragMotion.referenceFrame).value
+        let once120 = DragMotion.step(value: 0, goal: 100, frameDuration: DragMotion.fastestFrame).value
+        let twice120 = DragMotion.step(value: once120, goal: 100,
+                                       frameDuration: DragMotion.fastestFrame).value
+        check("a 60 Hz step outruns two 120 Hz steps", once60 > twice120,
+              "\(once60) vs \(twice120)")
+
+        section("Drag slop (the press is not a drag until it moves)")
+        check("the ported slop is 4 points", DragMotion.dragSlop == 4)
+        check("a 3.9-point move is still a press",
+              !DragMotion.exceedsSlop(from: .zero, to: CGPoint(x: 3.9, y: 0)))
+        check("a 4.0-point move is a drag",
+              DragMotion.exceedsSlop(from: .zero, to: CGPoint(x: 4, y: 0)))
+        check("the slop counts either axis, in either direction",
+              DragMotion.exceedsSlop(from: .zero, to: CGPoint(x: 0, y: -4))
+              && DragMotion.exceedsSlop(from: .zero, to: CGPoint(x: -4, y: 0)))
+        check("the slop is measured from the press, not from the origin",
+              !DragMotion.exceedsSlop(from: CGPoint(x: 500, y: 500), to: CGPoint(x: 503, y: 500)))
+
+        section("Drag motion (the pages a strip can rest on)")
+        check("a resting deck's offset is its page times the width",
+              DragMotion.restingGoal(page: 2, pageWidth: 1000) == -2000)
+        check("a settled offset rounds to the nearest page",
+              DragMotion.settledPage(offset: -1400, pageWidth: 1000, pageCount: 3) == 1
+              && DragMotion.settledPage(offset: -1600, pageWidth: 1000, pageCount: 3) == 2)
+        check("a settled offset is clamped to the deck",
+              DragMotion.settledPage(offset: 50_000, pageWidth: 1000, pageCount: 3) == 0
+              && DragMotion.settledPage(offset: -50_000, pageWidth: 1000, pageCount: 3) == 2)
+        check("a degenerate deck settles on page zero",
+              DragMotion.settledPage(offset: -900, pageWidth: 0, pageCount: 3) == 0
+              && DragMotion.settledPage(offset: -900, pageWidth: 1000, pageCount: 0) == 0)
+
+        section("Drag strip (the page turn, driven by the ported motion)")
+        // Everything above is arithmetic on constants. This is the object that
+        // actually moves the deck, and it is drivable frame by frame from here
+        // — the only way to pin 60 Hz vs 120 Hz behaviour, or the one-frame
+        // hand-back, without a screen.
+        //
+        // ⚠️ Note what is *absent* from every sequence below: the pointer. The
+        // strip is moved by a page change and by nothing else. An earlier cut
+        // fed it the pointer's travel, which made the whole grid slide sideways
+        // during a drag and cancelled the reflow into the bargain (report 37 §2).
+        let strip = DragOffsetModel()
+        strip.begin(scrollOffset: 2400, pageWidth: 1200, pageCount: 4)
+        check("a drag begins without moving the strip", strip.applied == 0, "\(strip.applied)")
+        check("the anchor is the page the strip was resting on", strip.anchorPage == 2)
+        check("the model is live once a drag begins", strip.isActive)
+
+        // The guard for the rule above: with no page asked for, no number of
+        // frames may move it. This is what would go red if the pointer's travel
+        // were ever fed back in.
+        for _ in 0 ..< 300 { strip.tick(frameDuration: 1.0 / 60.0) }
+        check("a drag that asks for no page never moves the strip",
+              strip.presented == -2400 && strip.applied == 0, "\(strip.presented)")
+
+        strip.nudge(to: 1)
+        check("an edge dwell aims the strip at the page it names",
+              strip.goal == -1200, "\(strip.goal)")
+        check("... without jumping it there", strip.presented == -2400)
+        strip.tick(frameDuration: 1.0 / 120.0)
+        // Asserted as a *fraction of the gap* rather than as a position, so the
+        // assertion states what the ramp means instead of what the arithmetic
+        // happened to produce. This is the reading report 32 got wrong.
+        check("a 120 Hz frame closes 21% of the remaining distance",
+              abs((strip.presented + 2400) / 1200 - 0.21) < 1e-9,
+              "\((strip.presented + 2400) / 1200)")
+        for _ in 0 ..< 300 { strip.tick(frameDuration: 1.0 / 60.0) }
+        check("the strip converges onto its goal exactly",
+              strip.presented == strip.goal, "\(strip.presented) vs \(strip.goal)")
+
+        // Beginning mid-glide is the case the "cancel the scroll offset" rule
+        // exists for: the deck must not twitch when it is grabbed.
+        let grabbed = DragOffsetModel()
+        grabbed.begin(scrollOffset: 3777, pageWidth: 1200, pageCount: 4)
+        check("grabbing a deck that is mid-glide still moves nothing",
+              grabbed.applied == 0, "\(grabbed.applied)")
+        check("a mid-glide deck anchors to the page it is nearest",
+              grabbed.anchorPage == 3, "\(grabbed.anchorPage)")
+
+        // The hand-back — the one thing that cannot be checked by looking at
+        // the offset alone, which is why `landing` is published rather than
+        // acted on in place. The case that matters is a release *mid-glide*: the
+        // page is decided at the instant the button comes up, but the deck must
+        // not be told about it until the strip has finished sliding there.
+        let settling = DragOffsetModel()
+        settling.begin(scrollOffset: 1200, pageWidth: 1200, pageCount: 4)
+        settling.nudge(to: 2)
+        settling.tick(frameDuration: 1.0 / 60.0)
+        check("a page turn in flight withholds the landing",
+              settling.landing == nil
+              && settling.presented != DragMotion.restingGoal(page: 2, pageWidth: 1200),
+              "\(settling.presented)")
+        // Asserted as the anchor rather than as "the nearest page", and the two
+        // differ right here: one 60 Hz frame in, the strip sits at −1704, which
+        // is nearest page 1. Reading the offset would name the page the drag has
+        // already left, while `commit()` places the drop on page 2 — the item
+        // would be put on a page the hand-back never scrolls to.
+        check("releasing mid-glide names the page the drag is on",
+              settling.release() == 2)
+        check("... and the release itself publishes nothing",
+              settling.landing == nil)
+        // ⚠️ The tick below is the whole point of the pair, not a formality.
+        // `landing` is published by the tick that *converges* (DragOffsetModel
+        // `tick`: `if step.settled, let target = landingTarget`). A check written
+        // before any tick therefore passes even with the settling guard removed
+        // — which is precisely how M67 survived twice: first in report 36, and
+        // again when report 37 reordered these lines and dropped the tick.
+        settling.tick(frameDuration: 1.0 / 60.0)
+        check("... and a frame into the glide it is still withheld",
+              settling.landing == nil
+              && settling.presented != DragMotion.restingGoal(page: 2, pageWidth: 1200),
+              "\(settling.presented)")
+        for _ in 0 ..< 300 { settling.tick(frameDuration: 1.0 / 60.0) }
+        check("the strip arrives at the page it will land on",
+              settling.presented == DragMotion.restingGoal(page: 2, pageWidth: 1200),
+              "\(settling.presented)")
+        check("landing appears once the strip has arrived", settling.landing == 2)
+        settling.completeLanding()
+        check("the hand-back returns the strip to the scroll view",
+              settling.applied == 0 && !settling.isActive && settling.landing == nil)
+
+        let shortPull = DragOffsetModel()
+        shortPull.begin(scrollOffset: 0, pageWidth: 1200, pageCount: 3)
+        for _ in 0 ..< 300 { shortPull.tick(frameDuration: 1.0 / 60.0) }
+        check("a drag that never leaves a page lands back on it",
+              shortPull.release() == 0)
+
+        // The edge dwell: it re-anchors and glides, it does not jump.
+        let nudged = DragOffsetModel()
+        nudged.begin(scrollOffset: 0, pageWidth: 1200, pageCount: 4)
+        nudged.nudge(to: 1)
+        check("a nudge moves the anchor", nudged.anchorPage == 1)
+        check("a nudge aims at the page it names", nudged.goal == -1200, "\(nudged.goal)")
+        check("a nudge does not jump the strip",
+              nudged.presented == 0, "\(nudged.presented)")
+        for _ in 0 ..< 300 { nudged.tick(frameDuration: 1.0 / 60.0) }
+        check("the strip glides onto the nudged page", nudged.presented == -1200)
+        // A second dwell has to be measured from the strip, not from the scroll
+        // view: the scroll view has not caught up yet, so asking it would refuse
+        // the second page turn and the deck would flip exactly once per drag.
+        nudged.nudge(to: 2)
+        check("a second dwell can turn another page",
+              nudged.anchorPage == 2 && nudged.goal == -2400,
+              "\(nudged.anchorPage) \(nudged.goal)")
+        nudged.nudge(to: 99)
+        check("a nudge is clamped to the deck", nudged.anchorPage == 3)
+
+        let dropped = DragOffsetModel()
+        dropped.begin(scrollOffset: 0, pageWidth: 1200, pageCount: 3)
+        dropped.nudge(to: 1)
+        for _ in 0 ..< 10 { dropped.tick(frameDuration: 1.0 / 60.0) }
+        check("a live page turn has the strip offset", dropped.applied != 0, "\(dropped.applied)")
+        dropped.cancel()
+        check("cancelling drops the drag and the offset",
+              dropped.applied == 0 && !dropped.isActive && dropped.landing == nil)
+
+        let inert = DragOffsetModel()
+        inert.tick(frameDuration: 1.0 / 60.0)
+        inert.nudge(to: 1)
+        check("the model is inert until a drag begins",
+              inert.applied == 0 && !inert.isActive)
+
+        section("Drag reflow (the pointer moves the icons, not the strip)")
+        // The half of the drag the pointer *is* supposed to move, driven through
+        // the call the host makes on every pointer move.
+        let reflowMetrics = GridMetrics(columns: 4, rows: 2, iconSize: 64,
+                                        cellWidth: 88, cellHeight: 92)
+        let reflowItems: [DeckSlot] = [.app("a"), .app("b"), .app("c"), .app("d")]
+        // A grid that does **not** start at the window's corner: the reflow has to
+        // take the grid's own origin off the point, and a zero origin would make
+        // that subtraction invisible to every assertion below (the equivalent
+        // mutation would survive).
+        let reflowFrame = CGRect(x: 120, y: 90, width: 800, height: 400)
+        let reflowTester = GridHitTester(metrics: reflowMetrics, itemCount: reflowItems.count,
+                                         containerSize: reflowFrame.size,
+                                         slotCount: reflowMetrics.capacity)
+        var reflowTargets: [Int] = []
+        let reflow = DragState()
+        reflow.gridFrame = reflowFrame
+        reflow.onLiveMove = { _, index in reflowTargets.append(index) }
+        let firstCentre = reflowTester.centre(of: 0)
+        reflow.begin(item: .app("a"), app: nil, title: nil, index: 0, page: 0,
+                     source: .grid,
+                     location: CGPoint(x: firstCentre.x + reflowFrame.minX,
+                                       y: firstCentre.y + reflowFrame.minY))
+        let secondCentre = reflowTester.centre(of: 1)
+        // The crossing sequence (report 45): the tile is touched first —
+        // arming the merge and opening no gap — and the gap only follows once
+        // the pointer moves past the tile into the cell's margin.
+        reflow.update(location: CGPoint(x: secondCentre.x + reflowFrame.minX,
+                                        y: secondCentre.y + reflowFrame.minY),
+                      page: 0, metrics: reflowMetrics, pageItems: reflowItems,
+                      capacity: reflowMetrics.capacity)
+        check("touching the tile arms the merge and opens no gap",
+              reflowTargets.isEmpty && reflow.combineAppID == "b",
+              "\(reflowTargets) / \(String(describing: reflow.combineAppID))")
+        let marginPoint = CGPoint(x: secondCentre.x + reflowMetrics.cellWidth / 2 - 2,
+                                  y: secondCentre.y)
+        reflow.update(location: CGPoint(x: marginPoint.x + reflowFrame.minX,
+                                        y: marginPoint.y + reflowFrame.minY),
+                      page: 0, metrics: reflowMetrics, pageItems: reflowItems,
+                      capacity: reflowMetrics.capacity)
+        check("the slot under the pointer is measured from the grid, not the window",
+              reflow.hoverIndex == 1, String(describing: reflow.hoverIndex))
+        check("... and the grid is asked to open the gap there",
+              reflowTargets == [1], "\(reflowTargets)")
+        check("overTile: the centre of a slot is on the tile",
+              reflowTester.overTile(at: secondCentre, index: 1))
+        check("overTile: the cell margin is not",
+              !reflowTester.overTile(at: marginPoint, index: 1))
+        reflow.reset()
+
+        section("Drag page (which page a drop belongs to)")
+        // After an edge dwell the strip is showing the new page while the scroll
+        // view is still on the old one — that is the whole point of the two-phase
+        // hand-back. A drop belongs to the page the user is looking at, so the
+        // drag has to read the strip. Reading `paging` instead put an item onto
+        // the page the user had just left.
+        let pageURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("opendeck-dragpage-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: pageURL) }
+        let pageStore = DeckStore(storeURL: pageURL)
+        pageStore.pages = [[.app("a")], [.app("b")], [.app("c")], [.app("d")]]
+        let pageVM = LaunchpadViewModel(store: pageStore)
+        let pageHost = DeckDragHost(store: pageStore, vm: pageVM)
+        // Mid-deck, not page 0: a zero here would be indistinguishable from the
+        // value every assertion below would fall back to anyway.
+        pageVM.paging.set(2, count: 4)
+        pageHost.offset.begin(scrollOffset: 2400, pageWidth: 1200, pageCount: 4)
+        check("a drag begins on the page the deck was showing",
+              pageHost.dragPage == 2, "\(pageHost.dragPage)")
+        // The window's edge timer maturing calls exactly this, and nothing else.
+        pageHost.drag.onRequestPage?(3)
+        check("an edge dwell moves the strip onto the page it was asked for",
+              pageHost.offset.anchorPage == 3)
+        // The deck's own answer to "which page am I on" must **not** move yet.
+        // The scroll view has not gone anywhere, and the page the strip has left
+        // is not one the deck is on. Writing it here would also survive an Esc
+        // that arrives mid-glide, leaving the indicator a page ahead of the grid
+        // for good.
+        check("... while the deck's own page waits for the hand-back",
+              pageVM.paging.resolved(count: 4) == 2,
+              "\(pageVM.paging.resolved(count: 4))")
+        check("so the drag works on the page the user is looking at",
+              pageHost.dragPage == 3, "\(pageHost.dragPage)")
+        pageHost.offset.cancel()
+        check("with no drag in flight the page is the deck's again",
+              pageHost.dragPage == 2, "\(pageHost.dragPage)")
+        pageHost.teardown()
+
+        section("Drag session routing (the deck window's mouse state machine)")
+        // The deck window routes mouse events before AppKit delivers them. The
+        // rule that matters most: a *click* must keep working, so the down is
+        // always forwarded; only a real drag is claimed.
+        var router = DragSessionState()
+        check("a press that misses every tile is forwarded",
+              router.mouseDown(slot: nil, at: .zero) == .normal)
+        check("a drag from empty space is never claimed",
+              router.mouseDragged(to: CGPoint(x: 400, y: 400), allowsDrag: true) == .normal
+              && router.mouseUp() == .normal)
+        let onTile = router.mouseDown(slot: 3, at: CGPoint(x: 300, y: 300))
+        check("a press on a tile is still forwarded, so the click can land",
+              onTile == .normal && !onTile.consumes)
+        check("a nudge below the slop stays a click",
+              router.mouseDragged(to: CGPoint(x: 302, y: 300), allowsDrag: true) == .normal)
+        let opened = router.mouseDragged(to: CGPoint(x: 320, y: 300), allowsDrag: true)
+        check("passing the slop opens the session for the pressed tile",
+              opened == .beginSession(slot: 3))
+        check("opening a session consumes the event",
+              opened.consumes)
+        let tracking = router.mouseDragged(to: CGPoint(x: 500, y: 300), allowsDrag: true)
+        check("later moves are tracked", tracking == .track && tracking.consumes)
+        let committed = router.mouseUp()
+        check("the release commits the drag", committed == .commit && committed.consumes)
+        check("after the commit the machine is idle again",
+              !router.isDragging && router.draggedSlot == nil && router.mouseUp() == .normal)
+
+        // The refusal path: a locked deck says why, and leaves no session behind.
+        var locked = DragSessionState()
+        _ = locked.mouseDown(slot: 1, at: .zero)
+        let refused = locked.mouseDragged(to: CGPoint(x: 40, y: 0), allowsDrag: false)
+        check("a locked deck refuses the drag", refused == .refuse && refused.consumes)
+        check("a refused drag leaves no session behind",
+              !locked.isDragging
+              && locked.mouseDragged(to: CGPoint(x: 90, y: 0), allowsDrag: false) == .normal)
+
+        // A press that never moves must still reach SwiftUI, or tapping a tile
+        // would stop launching anything.
+        var tapped = DragSessionState()
+        _ = tapped.mouseDown(slot: 7, at: CGPoint(x: 10, y: 10))
+        check("a press released without moving is a click, not a drag",
+              tapped.mouseUp() == .normal && !tapped.isDragging)
+
+        // Two downs without an intervening up would strand the first session,
+        // and an open session makes every later `save()` a no-op (data loss).
+        var stranded = DragSessionState()
+        _ = stranded.mouseDown(slot: 2, at: .zero)
+        _ = stranded.mouseDragged(to: CGPoint(x: 50, y: 0), allowsDrag: true)
+        check("a second down during a drag is swallowed, not restarted",
+              stranded.mouseDown(slot: 5, at: CGPoint(x: 60, y: 0)) == .consume
+              && stranded.draggedSlot == 2)
+        stranded.reset()
+        check("teardown drops the drag without committing",
+              !stranded.isDragging && stranded.mouseUp() == .normal)
+
+        section("Drag host (what a press actually grabs)")
+        // The one part of the drag with no pure-function twin: which tile a press
+        // lands on. Driven here with plain numbers, because a window and a real
+        // button-down cannot be had headlessly.
+        let hostURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("opendeck-draghost-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: hostURL) }
+        let hostStore = DeckStore(storeURL: hostURL)
+        hostStore.metrics = GridMetrics(columns: 4, rows: 2, iconSize: 64,
+                                        cellWidth: 88, cellHeight: 92)
+        hostStore.pages = [[.app("a"), .app("b"), .app("c")], [.app("d")]]
+        let hostVM = LaunchpadViewModel(store: hostStore)
+        let host = DeckDragHost(store: hostStore, vm: hostVM)
+        // The viewport the grid is centred in, as `GridHitTester` expects.
+        host.drag.gridFrame = CGRect(x: 0, y: 0, width: 800, height: 400)
+
+        let slotTester = GridHitTester(metrics: hostStore.metrics, itemCount: 3,
+                                       containerSize: host.drag.gridFrame.size,
+                                       slotCount: hostStore.metrics.capacity)
+        let hostGrabbed = host.hitTarget(at: slotTester.centre(of: 0))
+        check("a press on a tile grabs that tile, from the grid",
+              hostGrabbed?.item == .app("a") && hostGrabbed?.index == 0
+              && hostGrabbed?.source == .grid,
+              String(describing: hostGrabbed))
+        check("a press on another tile grabs that one",
+              host.hitTarget(at: slotTester.centre(of: 2))?.item == .app("c"))
+        check("a press on an empty slot grabs nothing",
+              host.hitTarget(at: slotTester.centre(of: 3)) == nil)
+        check("a press outside the grid grabs nothing",
+              host.hitTarget(at: CGPoint(x: -40, y: -40)) == nil)
+        // The panel covers the grid. A press there must not reach the tiles
+        // behind it, or dragging inside an open folder would grab whatever
+        // happened to lie underneath.
+        hostVM.openedFolder = UUID()
+        check("an open folder panel shadows the grid behind it",
+              host.hitTarget(at: slotTester.centre(of: 0)) == nil)
+        hostVM.openedFolder = nil
+
+        host.teardown()
+        check("teardown is safe when nothing is in flight",
+              !host.drag.isActive && host.offset.applied == 0)
+
+        section("Deck coordinates (a window point becomes the deck's own point)")
+        // The bug this pins — measured, not assumed (report 36 §1):
+        // `NSHostingView` is **flipped**, so `convert(_:from: nil)` already hands
+        // back a top-left-origin point, which is the space every
+        // `frame(in: .named("deck"))` is reported in. Flipping that result a
+        // second time mirrors the entire drag about the middle of the deck:
+        // press the top row and the bottom row's icon lifts. The conversion is
+        // exercised against a real hosting view in a real window, because a
+        // plain number here would only restate the rule and catch nothing.
+        let coordinateWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                                        styleMask: [.borderless], backing: .buffered, defer: false)
+        let coordinateView = NSHostingView(rootView: Color.clear)
+        coordinateView.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        coordinateWindow.contentView = coordinateView
+        check("the hosting view is flipped, so its own point is already top-left origin",
+              coordinateView.isFlipped)
+        let lowInWindow = DeckDragHost.deckPoint(ofWindowPoint: NSPoint(x: 100, y: 40),
+                                                 in: coordinateWindow)
+        check("40 up from the window's bottom edge lands 560 down from the deck's top",
+              lowInWindow == CGPoint(x: 100, y: 560), "\(lowInWindow)")
+        let highInWindow = DeckDragHost.deckPoint(ofWindowPoint: NSPoint(x: 700, y: 570),
+                                                  in: coordinateWindow)
+        check("30 down from the window's top edge stays 30 down from the deck's top",
+              highInWindow == CGPoint(x: 700, y: 30), "\(highInWindow)")
+        check("the icon is framed in the view's own space, centred on the pointer",
+              DeckDragHost.iconFrame(pointerInView: CGPoint(x: 100, y: 40), size: 64)
+              == NSRect(x: 68, y: 8, width: 64, height: 64))
+
         section("Hot key specs")
         check("F4 displays as F4", HotKeySpec.f4.displayString == "F4", HotKeySpec.f4.displayString)
         check("⌥Space shows modifier + key",
@@ -500,14 +1359,18 @@ enum SelfTest {
             print("      (no Launchpad database on this machine — skipping import checks)")
         }
 
-        section("Drag dwell target (crash regression)")
+        section("Drag fold target (crash regression)")
         let apps3: [DeckSlot] = [.app("a"), .app("b"), .folder(UUID())]
-        check("resting on an app yields its id",
+        // An app **is** a fold target — report 45 reverses report 40. LaunchOS
+        // arms a merge on a tile hover (`isDraggingMerge` in the binary; the
+        // user witnessed the effect and the folder-creating release), and the
+        // tile-scoped hover removes the geometry collision that sank the app
+        // target in report 40: a merge hover never reflows.
+        check("another app is a fold target",
               DragState.combineTarget(item: .app("z"), pageItems: apps3, index: 0) == .app("a"))
-        // Folders are valid combine targets: an app can be merged into an
-        // existing folder, which previously was impossible.
+        // A folder is: it is the one target the reflow cannot make ambiguous.
         let folderID = { if case .folder(let id) = apps3[2] { return id }; return UUID() }()
-        check("resting on a folder yields that folder",
+        check("a folder is a fold target",
               DragState.combineTarget(item: .app("z"), pageItems: apps3, index: 2) == .folder(folderID))
         check("dragging a folder never combines",
               DragState.combineTarget(item: .folder(UUID()), pageItems: apps3, index: 0) == nil)
@@ -801,16 +1664,32 @@ enum SelfTest {
         pipeline.onRequestPage = { pageRequests.append($0) }
 
         let row: [DeckSlot] = (0 ..< 5).map { .app("drag\($0)") }
+        // The tester `update` builds internally is reproduced here so the
+        // points land on real geometry: a centre hover on a tile arms the
+        // merge (no reflow, report 45) and a margin hover is the insertion
+        // point. The old hand-rolled centre ignored the tester's centring
+        // origin and only worked because the pre-45 reflow ignored *where*
+        // inside the cell the pointer was.
+        let pipelineTester = GridHitTester(metrics: dmetrics, itemCount: row.count,
+                                           containerSize: gridRect.size, slotCount: 35)
         func slotCentre(_ i: Int) -> CGPoint {
-            CGPoint(
-                x: gridRect.minX + CGFloat(i) * (dmetrics.cellWidth + GridMetrics.hSpacing) + dmetrics.cellWidth / 2,
-                y: gridRect.minY + dmetrics.cellHeight / 2
-            )
+            let c = pipelineTester.centre(of: i)
+            return CGPoint(x: c.x + gridRect.minX, y: c.y + gridRect.minY)
         }
 
         pipeline.begin(item: row[0], app: nil, title: nil, index: 0, page: 0,
                        location: slotCentre(0))
+        // The crossing sequence (report 45): tile first, margin past it. A
+        // centre hover arms the merge and opens no gap; the gap follows only
+        // once the pointer has crossed the tile.
+        func slotMargin(_ i: Int) -> CGPoint {
+            CGPoint(x: slotCentre(i).x + dmetrics.cellWidth / 2 - 2, y: slotCentre(i).y)
+        }
         pipeline.update(location: slotCentre(3), page: 0, metrics: dmetrics,
+                        pageItems: row, capacity: 35)
+        check("the tile hover itself still opens no gap", liveMoves.isEmpty,
+              "\(liveMoves)")
+        pipeline.update(location: slotMargin(3), page: 0, metrics: dmetrics,
                         pageItems: row, capacity: 35)
         check("in-grid drag reports the hovered slot", pipeline.hoverIndex == 3,
               "\(String(describing: pipeline.hoverIndex))")
@@ -820,6 +1699,8 @@ enum SelfTest {
         // B2: the live gap preview must survive crossing a page.
         liveMoves.removeAll()
         pipeline.update(location: slotCentre(1), page: 1, metrics: dmetrics,
+                        pageItems: row, capacity: 35)
+        pipeline.update(location: slotMargin(1), page: 1, metrics: dmetrics,
                         pageItems: row, capacity: 35)
         check("live reorder still fires after a page flip", liveMoves == [1], "\(liveMoves)")
 
@@ -855,21 +1736,341 @@ enum SelfTest {
         check("the batch flushes exactly once on release", afterBatch != nil)
         try? FileManager.default.removeItem(at: probeURL)
 
-        section("Combine decision (live-reorder regression)")
+        section("Fold decision (release-triggered, live-reorder regression)")
         let shelf: [DeckSlot] = [.app("a"), .app("b"), .folder(UUID())]
         let folderID2 = { if case .folder(let id) = shelf[2] { return id }; return UUID() }()
         // The regression: after the live reflow the dragged app occupies the
-        // hovered slot, and cancelling there made combining impossible.
-        check("hovering the dragged item itself keeps the pending combine",
-              DragState.dwellDecision(item: .app("a"), pageItems: shelf, index: 0) == .keep)
-        check("hovering another app starts a combine with it",
-              DragState.dwellDecision(item: .app("a"), pageItems: shelf, index: 1) == .start(.app("b")))
-        check("hovering a folder starts a combine with that folder",
-              DragState.dwellDecision(item: .app("a"), pageItems: shelf, index: 2) == .start(.folder(folderID2)))
+        // hovered slot, and cancelling there made folding impossible.
+        check("hovering the dragged item itself keeps the pending fold",
+              DragState.combineDecision(item: .app("a"), pageItems: shelf, index: 0) == .keep)
+        // Hovering another app names it as the merge target (report 45). The
+        // tile-vs-margin split lives one level up, in `update`.
+        check("hovering another app names it",
+              DragState.combineDecision(item: .app("a"), pageItems: shelf, index: 1) == .start(.app("b")))
+        check("hovering a folder names that folder",
+              DragState.combineDecision(item: .app("a"), pageItems: shelf, index: 2) == .start(.folder(folderID2)))
         check("an empty trailing slot cancels",
-              DragState.dwellDecision(item: .app("a"), pageItems: shelf, index: 9) == .cancel)
-        check("dragging a folder never starts a combine",
-              DragState.dwellDecision(item: .folder(UUID()), pageItems: shelf, index: 1) == .cancel)
+              DragState.combineDecision(item: .app("a"), pageItems: shelf, index: 9) == .cancel)
+        check("dragging a folder never starts a fold",
+              DragState.combineDecision(item: .folder(UUID()), pageItems: shelf, index: 1) == .cancel)
+
+        // The rest of the rule is *when* it fires. Nothing may happen while the
+        // button is down: the target is only remembered, and the release is the
+        // one thing that turns it into a fold. There is no timer left to test
+        // for — the change was to delete it — so what is pinned here is that the
+        // decision survives the reflow and is read at the drop.
+        let reflowMetrics2 = GridMetrics(columns: 4, rows: 2, iconSize: 64,
+                                         cellWidth: 88, cellHeight: 92)
+        let tester2 = GridHitTester(metrics: reflowMetrics2, itemCount: shelf.count,
+                                    containerSize: CGSize(width: 800, height: 400),
+                                    slotCount: reflowMetrics2.capacity)
+        let moving = DragState()
+        moving.gridFrame = CGRect(x: 0, y: 0, width: 800, height: 400)
+        var reflowedTo: [Int] = []
+        moving.onLiveMove = { _, index in reflowedTo.append(index) }
+        moving.begin(item: .app("a"), app: nil, title: nil, index: 0, page: 0,
+                     source: .grid, location: CGPoint(x: 10, y: 10))
+        // Hovering the *app* at index 1 (the centre is on the tile) arms the
+        // merge and opens **no** gap: the tile must not be slid out from under
+        // the pointer (report 45). The drop is the fold.
+        moving.update(location: tester2.centre(of: 1), page: 0, metrics: reflowMetrics2,
+                      pageItems: shelf, capacity: reflowMetrics2.capacity)
+        check("hovering an app tile opens no gap — the tile stays put",
+              reflowedTo.isEmpty, "\(reflowedTo)")
+        check("... and releasing there folds the two apps",
+              moving.drop(metrics: reflowMetrics2, pageItems: shelf) == .combine(.app("b")))
+        moving.reset()
+
+        // The distance judgment (report 45): the margin on the **approach**
+        // side is not an insertion point — nothing moves until the pointer has
+        // crossed the tile. The user pinned it: moving an icon toward another
+        // from the right prepares the merge on contact, and the position only
+        // changes once the icon has moved to the other icon's left.
+        let slider = DragState()
+        slider.gridFrame = CGRect(x: 0, y: 0, width: 800, height: 400)
+        var slidTo: [Int] = []
+        slider.onLiveMove = { _, index in slidTo.append(index) }
+        slider.begin(item: .app("a"), app: nil, title: nil, index: 0, page: 0,
+                     source: .grid, location: CGPoint(x: 10, y: 10))
+        let cell1Centre = tester2.centre(of: 1)
+        let margin1 = CGPoint(x: cell1Centre.x + reflowMetrics2.cellWidth / 2 - 2, y: cell1Centre.y)
+        slider.update(location: margin1, page: 0, metrics: reflowMetrics2,
+                      pageItems: shelf, capacity: reflowMetrics2.capacity)
+        check("the approach margin moves nothing — the position only changes past the tile",
+              slidTo.isEmpty, "\(slidTo)")
+        check("... and the release there sends the icon home",
+              slider.drop(metrics: reflowMetrics2, pageItems: shelf) == .none)
+        slider.update(location: cell1Centre, page: 0, metrics: reflowMetrics2,
+                      pageItems: shelf, capacity: reflowMetrics2.capacity)
+        check("touching the tile arms the merge and still moves nothing",
+              slider.combineAppID == "b" && slidTo.isEmpty,
+              "\(String(describing: slider.combineAppID)) / \(slidTo)")
+        slider.update(location: margin1, page: 0, metrics: reflowMetrics2,
+                      pageItems: shelf, capacity: reflowMetrics2.capacity)
+        check("crossing past the tile opens the gap",
+              slidTo == [1], "\(slidTo)")
+        check("... and the merge signal is gone",
+              slider.combineAppID == nil, String(describing: slider.combineAppID))
+        check("... and the release is a move, not a fold",
+              slider.drop(metrics: reflowMetrics2, pageItems: shelf) == .toIndex(1))
+        slider.reset()
+
+        // The same gesture over a folder tile: the fold is armed and no gap
+        // opens — the folder must not be slid aside (report 45; the user
+        // watched LaunchOS hold the folder in place while hovered).
+        let folding = DragState()
+        folding.gridFrame = CGRect(x: 0, y: 0, width: 800, height: 400)
+        var foldedTo: [Int] = []
+        folding.onLiveMove = { _, index in foldedTo.append(index) }
+        folding.begin(item: .app("a"), app: nil, title: nil, index: 0, page: 0,
+                      source: .grid, location: CGPoint(x: 10, y: 10))
+        folding.update(location: tester2.centre(of: 2), page: 0, metrics: reflowMetrics2,
+                       pageItems: shelf, capacity: reflowMetrics2.capacity)
+        check("hovering a folder opens no gap — the folder stays put",
+              foldedTo.isEmpty, "\(foldedTo)")
+        check("... and the drop is the fold",
+              folding.drop(metrics: reflowMetrics2, pageItems: shelf) == .combine(.folder(folderID2)))
+        // The live reflow has moved the dragged app into that slot by now, so
+        // this second move is the state the pointer actually sits in. A decision
+        // read from `pageItems` would answer "the app you are dragging" here and
+        // the fold would never happen — which is exactly the bug the remembered
+        // candidate exists for.
+        let reflowed: [DeckSlot] = [.app("b"), .folder(folderID2), .app("a")]
+        folding.update(location: tester2.centre(of: 2), page: 0, metrics: reflowMetrics2,
+                       pageItems: reflowed, capacity: reflowMetrics2.capacity)
+        check("the reflow filling the slot does not lose the target",
+              folding.drop(metrics: reflowMetrics2, pageItems: reflowed) == .combine(.folder(folderID2)))
+        // Leaving **by the margin** exercises the `.cancel` arm — moving onto
+        // another tile goes through `.start` now that apps are targets, and
+        // that path clears the signal on its own. The margin is where the
+        // clear is observable on its own.
+        let foldCentre = tester2.centre(of: 2)
+        let foldMargin = CGPoint(x: foldCentre.x + reflowMetrics2.cellWidth / 2 - 2, y: foldCentre.y)
+        folding.update(location: foldMargin, page: 0, metrics: reflowMetrics2,
+                       pageItems: shelf, capacity: reflowMetrics2.capacity)
+        check("leaving by the margin drops the fold signal",
+              folding.combineFolderID == nil, String(describing: folding.combineFolderID))
+        // Leaving the target takes the fold back off the table.
+        folding.update(location: tester2.centre(of: 5), page: 0, metrics: reflowMetrics2,
+                       pageItems: reflowed, capacity: reflowMetrics2.capacity)
+        check("moving off the target drops the fold",
+              folding.drop(metrics: reflowMetrics2, pageItems: reflowed) == .toIndex(5))
+        check("the gap reopens once the pointer leaves the tile",
+              foldedTo == [2, 5], "\(foldedTo)")
+        folding.reset()
+
+        // A member dragged around inside an open folder panel is a reorder of
+        // that panel. The grid is visible behind the panel and its tiles answer
+        // the same hit test, so the source has to be consulted or a reorder
+        // inside a folder would silently fold the app into whatever folder
+        // happens to be behind the panel.
+        //
+        // The hover target here is a **folder** on purpose. It used to be the app
+        // at index 1, which stopped pinning the guard the moment an app stopped
+        // being a fold target: with an app tile the candidate is nil whatever the
+        // source is, so dropping the guard changes nothing and M88 survives.
+        let member = DragState()
+        member.gridFrame = CGRect(x: 0, y: 0, width: 800, height: 400)
+        member.begin(item: .app("a"), app: nil, title: nil, index: 0, page: 0,
+                     source: .folderMember(folderID2), location: CGPoint(x: 10, y: 10))
+        member.update(location: tester2.centre(of: 2), page: 0, metrics: reflowMetrics2,
+                      pageItems: shelf, capacity: reflowMetrics2.capacity)
+        check("a folder member never folds into the grid folder behind the panel",
+              member.drop(metrics: reflowMetrics2, pageItems: shelf) == .toIndex(2))
+        member.reset()
+
+        // The decision being right is not the same as the effect happening. This
+        // is the half that a release-time fold could get wrong silently — the
+        // checks above pass, and nothing at all is written to the store.
+        let releaseURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("opendeck-release-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: releaseURL) }
+        let releaseMetrics = GridMetrics(columns: 4, rows: 2, iconSize: 64,
+                                         cellWidth: 88, cellHeight: 92)
+        let releaseStore = DeckStore(storeURL: releaseURL)
+        releaseStore.metrics = releaseMetrics
+        releaseStore.pages = [[.app("a"), .app("b"), .app("c")]]
+        let releaseVM = LaunchpadViewModel(store: releaseStore)
+        let releaseHost = DeckDragHost(store: releaseStore, vm: releaseVM)
+        releaseHost.drag.gridFrame = CGRect(x: 0, y: 0, width: 800, height: 400)
+        releaseHost.offset.begin(scrollOffset: 0, pageWidth: 1200, pageCount: 1)
+        releaseHost.drag.begin(item: .app("a"), app: nil, title: "A", index: 0, page: 0,
+                               source: .grid, location: .zero)
+        let releaseTester = GridHitTester(metrics: releaseMetrics, itemCount: 3,
+                                          containerSize: releaseHost.drag.gridFrame.size,
+                                          slotCount: releaseMetrics.capacity)
+        releaseHost.drag.update(location: releaseTester.centre(of: 1), page: 0,
+                                metrics: releaseMetrics, pageItems: releaseStore.pages[0],
+                                capacity: releaseMetrics.capacity)
+        check("nothing is written while the button is still down",
+              releaseStore.folders.isEmpty, "\(releaseStore.folders.count) folder(s)")
+        releaseHost.commit()
+        // Releasing on another app **creates the folder** (report 45): the
+        // merge armed on the tile hover lands here, at the commit.
+        check("releasing on another app folds them into a new folder",
+              releaseStore.folders.count == 1, "\(releaseStore.folders.count) folder(s)")
+        if case .folder(let mergedID)? = releaseStore.pages[0].first,
+           let merged = releaseStore.folder(mergedID),
+           merged.appIDs.contains("a"), merged.appIDs.contains("b") {
+            check("... and both apps live inside the new folder", true)
+        } else {
+            check("... and both apps live inside the new folder", false,
+                  "\(releaseStore.pages)")
+        }
+        check("the rest of the page is untouched",
+              releaseStore.pages[0].dropFirst() == [.app("c")],
+              "\(releaseStore.pages)")
+        releaseHost.teardown()
+
+        // The other half of the same release: a folder **is** a fold target, and
+        // the fold has to really reach the store. Without this, deleting the
+        // `addToFolder` call would leave every check above green.
+        let foldURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("opendeck-fold-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: foldURL) }
+        let foldStore = DeckStore(storeURL: foldURL)
+        foldStore.metrics = releaseMetrics
+        // Real ids, not a synthetic trio: `folderApps` resolves members through
+        // the scan index (`index[$0]`), so invented ids leave the folder looking
+        // empty and the check below fails for a reason that is not the code path
+        // under test. (Measured the hard way — the first cut used "a"/"b"/"c".)
+        let foldIDs = Array(foldStore.visibleApps.prefix(3)).map(\.id)
+        if foldIDs.count == 3 {
+            foldStore.pages = [[.app(foldIDs[0]), .app(foldIDs[1]), .app(foldIDs[2])]]
+            foldStore.makeFolder(dropping: foldIDs[1], onto: foldIDs[0])
+        }
+        if foldIDs.count == 3,
+           let foldID = foldStore.folders.keys.first,
+           let folderSlot = foldStore.locate(.folder(foldID)) {
+            let foldVM = LaunchpadViewModel(store: foldStore)
+            let foldHost = DeckDragHost(store: foldStore, vm: foldVM)
+            foldHost.drag.gridFrame = CGRect(x: 0, y: 0, width: 800, height: 400)
+            foldHost.offset.begin(scrollOffset: 0, pageWidth: 1200, pageCount: 1)
+            let foldItems = foldStore.pages[0]
+            foldHost.drag.begin(item: .app(foldIDs[2]), app: nil, title: "C",
+                                index: foldItems.count - 1, page: 0,
+                                source: .grid, location: .zero)
+            let foldTester = GridHitTester(metrics: releaseMetrics, itemCount: foldItems.count,
+                                           containerSize: foldHost.drag.gridFrame.size,
+                                           slotCount: releaseMetrics.capacity)
+            foldHost.drag.update(location: foldTester.centre(of: folderSlot.item), page: 0,
+                                 metrics: releaseMetrics, pageItems: foldItems,
+                                 capacity: releaseMetrics.capacity)
+            foldHost.commit()
+            check("releasing on a folder puts the app inside it",
+                  foldStore.folderApps(foldID).contains { $0.id == foldIDs[2] },
+                  "\(foldStore.folderApps(foldID).map(\.id))")
+            check("... and it is no longer a grid slot of its own",
+                  foldStore.locate(.app(foldIDs[2])) == nil, "\(foldStore.pages)")
+            foldHost.teardown()
+        } else {
+            check("the fold fixture built a three-app page holding one folder", false,
+                  "ids=\(foldIDs.count) folders=\(foldStore.folders.count) pages=\(foldStore.pages)")
+        }
+
+        section("Drag image (the icon in the air must not be rescaled)")
+        // `NSWorkspace.icon(forFile:)` is a 1024-point image. Handing it straight
+        // to `setDraggingFrame(_:contents:)` looks like it should work and does
+        // not: AppKit derives its dragging component at its own legacy size, and
+        // a measured 64×64 frame came back with a **32 pt / 32 px** image to
+        // stretch into it — 4× on a Retina display, which is the soft icon that
+        // was reported. The image handed over must have the frame's own logical
+        // size; `lockFocus` then picks up the screen's pixel scale by itself.
+        //
+        // Measured, not reasoned: probe `/tmp/probe-dragsession/main8.swift`.
+        //
+        // The seam is exercised with a 1024-point stand-in so the assertion does
+        // not depend on whatever icon happens to be installed — and reverting the
+        // fix fails it outright, because the raw icon's size *is* 1024.
+        IconCache.clear()
+        IconCache.loadIcon = { _ in
+            let image = NSImage(size: NSSize(width: 1024, height: 1024))
+            image.addRepresentation(NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 1024, pixelsHigh: 1024,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!)
+            return image
+        }
+        let iconSize = store.metrics.iconSize
+        let airIcon = DragImageFactory.image(for: .app(store.apps.first?.id ?? "/none"), store: store,
+                                             size: iconSize)
+        check("the app icon handed to the drag session is the frame's own size",
+              airIcon.size == NSSize(width: iconSize, height: iconSize), "\(airIcon.size)")
+        check("... not the 1024 points the icon came in at",
+              airIcon.size.width < 1024, "\(airIcon.size)")
+        check("... with a rep at least as wide as the frame, for a Retina screen",
+              airIcon.representations.allSatisfy { CGFloat($0.pixelsWide) >= iconSize },
+              "\(airIcon.representations.map { "\($0.pixelsWide)x\($0.pixelsHigh)" })")
+        let airFolder = DragImageFactory.image(for: .folder(UUID()), store: store, size: iconSize)
+        check("a folder's drag image is the frame's size too",
+              airFolder.size == NSSize(width: iconSize, height: iconSize), "\(airFolder.size)")
+        let airBlank = DragImageFactory.image(for: .app("/definitely-not-installed.app"),
+                                              store: store, size: iconSize)
+        check("an app whose icon cannot be found still gets a frame-sized image",
+              airBlank.size == NSSize(width: iconSize, height: iconSize), "\(airBlank.size)")
+        IconCache.loadIcon = { NSWorkspace.shared.icon(forFile: $0) }
+        IconCache.clear()
+
+        // Being in front of the *grid* is not enough. The icon also has to be in
+        // front of the deck **window**, or the full-screen frosted backdrop is
+        // composited over it and the icon reads as having fallen into the blur —
+        // "the icon became background". That was the report this pair answers.
+        //
+        // AppKit puts the dragged image in a window of its own at
+        // `kCGDraggingWindowLevel`. Measured: **500** — and it stays 500 even when
+        // the source window is at the shielding level, so AppKit never raises the
+        // drag image above the window it came from (probe
+        // `/tmp/probe-dragsession/main11.swift`, reading `CGWindowListCopyWindowInfo`
+        // from a timer while the drag loop owns the run loop).
+        //
+        // The deck used to be created at `CGShieldingWindowLevel()` — measured
+        // 2147483628 — which is above the dragging window by every measure.
+        let deckLevel = LaunchpadWindowController.deckWindowLevel.rawValue
+        // ⚠️ Compared against the **measured literal** on purpose. `deckWindowLevel`
+        // is *defined* as one below `CGWindowLevelForKey(.draggingWindow)`, so
+        // writing `deckLevel < CGWindowLevelForKey(.draggingWindow)` here would be
+        // `X − 1 < X`: a tautology that can never fail and that **no mutation can
+        // ever expose**. The literal also catches the system moving under us —
+        // drift downward trips the popup-menu check below, drift upward trips this
+        // one.
+        check("the deck sits below the window AppKit drags the icon in (500)",
+              deckLevel < 500, "deck \(deckLevel)")
+        check("... and still covers the Dock, the menu bar and popup menus",
+              deckLevel > Int(CGWindowLevelForKey(.popUpMenuWindow)), "\(deckLevel)")
+        check("... and is not the shielding level it used to be",
+              deckLevel != Int(CGShieldingWindowLevel()), "\(deckLevel)")
+        // The rule above is a *decision*; this is the *effect*, and the two live
+        // in different objects. M89 survived a round by rewriting only the line
+        // that applies it (the exact hole M87 found), and moving that line into
+        // its own `applyDeckLevel(to:)` did **not** close it either: a mutation
+        // reverting the call site in `show()` still stayed green, because nothing
+        // here can run `show()`.
+        //
+        // So the deck window is now built in exactly one place, and that place is
+        // driven here. The window is never ordered on screen.
+        guard let selftestScreen = NSScreen.main else { fatalError("no screen") }
+        // The mode is passed explicitly: `makeDeckWindow` otherwise reads the
+        // user's live `displayMode`, and a check that only passes while they
+        // happen to be in full-screen mode is not a check.
+        let builtDeck = LaunchpadWindowController.makeDeckWindow(on: selftestScreen,
+                                                                 mode: .fullScreen)
+        check("the deck window it builds is put below the drag window",
+              builtDeck.level.rawValue == deckLevel, "\(builtDeck.level.rawValue)")
+        check("... and it is still the borderless, clear window it was",
+              !builtDeck.isOpaque && builtDeck.backgroundColor == .clear && !builtDeck.hasShadow)
+        // The windowed deck is a normal window — a titled one that other apps
+        // can come over (report 56 §5).
+        let windowedDeck = LaunchpadWindowController.makeDeckWindow(on: selftestScreen,
+                                                                    mode: .window)
+        check("56-E: the windowed deck sits at the normal level",
+              windowedDeck.level == .normal, "\(windowedDeck.level.rawValue)")
+        check("56-E: the windowed deck is a titled, resizable window",
+              windowedDeck.styleMask.contains(.titled)
+              && windowedDeck.styleMask.contains(.resizable)
+              && windowedDeck.styleMask.contains(.closable))
+        check("56-E: the windowed deck is smaller than the screen",
+              windowedDeck.frame.width < selftestScreen.frame.width
+              && windowedDeck.frame.height < selftestScreen.frame.height)
 
         section("Page index bounds (review C1)")
         check("a page below zero clamps to the first page", DragState.clampPage(-1, count: 4) == 0)
@@ -1085,6 +2286,28 @@ enum SelfTest {
         check("a folder member dropped on a dot lands on the target page (B/C6)",
               movedOut && ssot.locate(.app("fb-a"))?.section == 1,
               "section \(String(describing: ssot.locate(.app("fb-a"))?.section))")
+        // A refusal must not have moved anything. The old order called
+        // `removeFromFolder` (which saves) *before* the `locate` guard, so a
+        // failure returned `false` with the layout already changed on disk.
+        let beforeRefusal = ssot.pages
+        check("a move out of a folder that does not exist is refused",
+              ssot.moveOutOfFolder("fb-a", folder: UUID(), toPage: 1, index: 0) == false)
+        check("...and that refusal moves nothing",
+              ssot.pages == beforeRefusal, "\(ssot.pages.map(\.count))")
+
+        // A folder that exists but has no grid slot is the case the old guard
+        // reached only *after* mutating, so this is the regression that mattered.
+        let ghost = AppFolder(name: "Ghost", appIDs: ["ghost-a", "ghost-b"])
+        ssot.folders[ghost.id] = ghost
+        let beforeGhost = ssot.pages
+        check("a folder with no grid slot refuses the move",
+              ssot.moveOutOfFolder("ghost-a", folder: ghost.id, toPage: 0, index: 0) == false)
+        check("...that refusal also moves nothing",
+              ssot.pages == beforeGhost && ssot.locate(.app("ghost-a")) == nil,
+              "\(ssot.pages.map(\.count))")
+        check("...and the refused folder keeps both members",
+              ssot.folder(ghost.id)?.appIDs.count == 2)
+
         ssot.endDragSession()
         try? FileManager.default.removeItem(at: ssotURL)
 
@@ -1194,22 +2417,25 @@ enum SelfTest {
         let accessibilityOptional = true
         check("permission probes answer without crashing", accessibilityOptional)
 
-        section("Folder column rule (review C1)")
-        // The keyboard navigation inside a folder must use the same column count
-        // the folder panel actually draws. Before the fix `LaunchpadViewModel`
-        // hard-coded four, so ↑/↓ skipped or mis-aligned rows for 2–9 member
-        // folders. `FolderLayout` is now the single source for both.
-        let expectedColumns: [(count: Int, columns: Int)] = [
-            (0, 1), (1, 1), (2, 2), (3, 2), (4, 2), (5, 3), (6, 3), (7, 3),
-            (8, 3), (9, 3), (10, 4), (11, 4), (12, 4), (13, 4), (14, 4),
-            (15, 4), (16, 4), (17, 4), (18, 4), (19, 4), (20, 4),
-        ]
-        let columnMismatch = expectedColumns.filter {
-            FolderLayout.columns(forMemberCount: $0.count) != $0.columns
+        section("Folder column rule — the page's columns (LaunchOS columnsPerPage)")
+        // LaunchOS lays a folder with the deck's column count (its
+        // `columnsPerPage`): a fixed-width, left-aligned grid that only grows in
+        // height. So the member count must NOT change the column count — the old
+        // 1/2/3/4-by-count rule made small folders narrower, the opposite of
+        // LaunchOS. `LaunchpadViewModel` keyboard nav reads the same rule.
+        let pageCols = 7
+        let wrongWidth = (0 ... 20).filter {
+            FolderLayout.columns(pageColumns: pageCols, memberCount: $0) != pageCols
         }
-        check("folder column count matches the panel rule for 0..20 members",
-              columnMismatch.isEmpty,
-              "\(columnMismatch.map { "\($0.count)->\(FolderLayout.columns(forMemberCount: $0.count))" })")
+        check("folder column count is the page's for every member count 0..20",
+              wrongWidth.isEmpty,
+              "\(wrongWidth.map { "\($0) members" })")
+
+        check("folder tracks a narrower page preset",
+              FolderLayout.columns(pageColumns: 5) == 5
+              && FolderLayout.columns(pageColumns: 10) == 10)
+        check("degenerate page width clamps to one column",
+              FolderLayout.columns(pageColumns: 0) == 1)
 
         // Local helper: files next to `url` whose name starts with its name and
         // contains `marker` (i.e. the `.corrupt-*` / `.bak` siblings).
@@ -1834,6 +3060,1143 @@ enum SelfTest {
         check("🔴A(one) a second scan confirms it and drops the mark",
               markVictim.map { !slotStore.hidden.contains($0.id) } == true)
         sweep(slotURL, ".empty-pages-")
+
+        // ------------------------------------------------------------------
+        // Report 41 — a folder the user creates on purpose.
+        //
+        // The one folder in the model allowed to hold a **single** member, and a
+        // deliberate departure from LaunchOS: its string table (en and zh-Hans),
+        // its raw binary strings and its selector list were all searched and
+        // contain no create-folder anything. LaunchOS can rename, ungroup and
+        // move apps *into* folders; it cannot make one. So this is not parity —
+        // it is a capability added on purpose.
+        //
+        // Both halves are asserted: the **decision** (`dissolves`) and the
+        // **effect** (a real store, a real file). Report 39's M89 was lost to
+        // exactly this split, so neither half is allowed to stand alone.
+        // ------------------------------------------------------------------
+        // ------------------------------------------------------------------
+        // 42 — Icon size, latin search, Dock icon
+        //
+        // Three additions that each reduce to a **pure function**, so all three
+        // are asserted headlessly instead of eyeballed. The icon-size one carries
+        // a regression check that recomputes the pre-42 formula, so "the default
+        // is a no-op" is asserted rather than assumed.
+        // ------------------------------------------------------------------
+        section("Review 42 — Icon size, latin search, Dock icon")
+
+        // 42-A: the icon scale. `big` is a screen whose derived base is the 116pt
+        // ceiling, so the multiple is plainly visible in the result.
+        let bigScreen = CGSize(width: 2560, height: 1440)
+        let unscaled = GridMetrics.make(in: bigScreen, preset: .grid7x5)
+        let preFortyTwo = min(max(min(unscaled.cellWidth - 34, unscaled.cellHeight - 54), 56), 116).rounded()
+        check("42-A: the default scale reproduces the pre-42 icon size exactly",
+              unscaled.iconSize == preFortyTwo, "\(unscaled.iconSize) vs \(preFortyTwo)")
+        check("42-A: a larger scale gives a larger icon",
+              GridMetrics.make(in: bigScreen, preset: .grid7x5, iconScale: 1.25).iconSize > unscaled.iconSize)
+        check("42-A: a smaller scale gives a smaller icon",
+              GridMetrics.make(in: bigScreen, preset: .grid7x5, iconScale: 0.8).iconSize < unscaled.iconSize)
+        check("42-A: an absurdly large scale stops at the declared maximum",
+              GridMetrics.make(in: bigScreen, preset: .grid7x5, iconScale: 99).iconSize
+                  == (unscaled.iconSize * IconScale.maximum).rounded())
+        check("42-A: an absurdly small scale stops at the declared minimum",
+              GridMetrics.make(in: bigScreen, preset: .grid7x5, iconScale: 0.01).iconSize
+                  == (unscaled.iconSize * IconScale.minimum).rounded())
+        check("42-A: IconScale.clamped clamps at both ends",
+              IconScale.clamped(0) == IconScale.minimum && IconScale.clamped(9) == IconScale.maximum)
+
+        // The cell-edge clamp only bites on a screen whose cells are just wide
+        // enough for the 116pt base: 1352x1182 yields cellWidth 160 / cellHeight
+        // 180, where 1.4 x 116 would overflow. The fixture is asserted first, so
+        // a later geometry change cannot quietly make the next check vacuous.
+        let snugScreen = CGSize(width: 1352, height: 1182)
+        let snugBase = GridMetrics.make(in: snugScreen, preset: .grid7x5)
+        let snug = GridMetrics.make(in: snugScreen, preset: .grid7x5, iconScale: 99)
+        check("42-A: (fixture) that screen really would overflow without the clamp",
+              snug.iconSize < (snugBase.iconSize * IconScale.maximum).rounded(),
+              "snug \(snug.iconSize) vs raw \((snugBase.iconSize * IconScale.maximum).rounded())")
+        check("42-A: a scaled-up icon is held inside its cell",
+              snug.iconSize <= min(snug.cellWidth - 8, snug.cellHeight - 8),
+              "\(snug.iconSize) in \(snug.cellWidth)x\(snug.cellHeight)")
+
+        // 42-B: latin (pinyin) search. `matchScore` is the ranking rule itself,
+        // so these do not go through a store or a keystroke.
+        check("42-B: 微信 transliterates to a latin form",
+              (LaunchpadViewModel.latinized("微信") ?? "").contains("wei"),
+              LaunchpadViewModel.latinized("微信") ?? "nil")
+        check("42-B: an ASCII name survives transliteration unchanged",
+              (LaunchpadViewModel.latinized("Safari") ?? "").contains("safari"))
+        check("42-B: typing the pinyin 'weixin' finds 微信",
+              LaunchpadViewModel.matchScore(name: "微信", latin: "weixin", bundleID: nil, raw: "weixin", needle: "weixin") == 0)
+        check("42-B: typing it with a space ('wei xin') finds 微信 too",
+              LaunchpadViewModel.matchScore(name: "微信", latin: "weixin", bundleID: nil, raw: "wei xin", needle: "weixin") == 0)
+        check("42-B: the initials 'wx' find 微信 as a subsequence",
+              LaunchpadViewModel.matchScore(name: "微信", latin: "weixin", bundleID: nil, raw: "wx", needle: "wx") == 4)
+        check("42-B: 'zhifubao' finds 支付宝",
+              LaunchpadViewModel.matchScore(name: "支付宝", latin: "zhifubao", bundleID: nil, raw: "zhifubao", needle: "zhifubao") == 0)
+        // These two drive `latinKey` itself, the seam the live search uses.
+        // Without them the latin assertions above pass on hand-written inputs
+        // and never exercise the transliteration + space-stripping path at all
+        // (that is exactly how M107 survived the first run).
+        check("42-B: the latin key drops the spaces the transliteration inserts",
+              LaunchpadViewModel.latinKey(for: "微信") == "weixin",
+              LaunchpadViewModel.latinKey(for: "微信") ?? "nil")
+        check("42-B: a name with no latin form has no latin key",
+              LaunchpadViewModel.latinKey(for: "") == nil)
+        check("42-B: a name with no latin form still matches by name",
+              LaunchpadViewModel.matchScore(name: "Safari", latin: nil, bundleID: nil, raw: "saf", needle: "saf") == 1)
+        check("42-B: a query that matches nothing returns nil",
+              LaunchpadViewModel.matchScore(name: "微信", latin: "weixin", bundleID: nil, raw: "qq", needle: "qq") == nil)
+
+        // 42-C: the Dock-icon toggle.
+        check("42-C: asking for a Dock icon maps to .regular",
+              DockIconPolicy.policy(showDockIcon: true) == .regular)
+        check("42-C: turning it off maps to .accessory",
+              DockIconPolicy.policy(showDockIcon: false) == .accessory)
+        check("42-C: headless refuses to change the Dock icon, and does not lie about it",
+              DeckSettings.shared.applyDockIcon() == false && !DeckSettings.shared.mayPersist)
+
+        section("Review 43 — Screen policy, self-exclusion, Dock-icon trap")
+
+        // 43-A: the placement decision, driven with constructed geometry. This
+        // machine has one display, so the four policies can only be told apart
+        // here — a real `NSScreen` cannot even be constructed.
+        let lead = ScreenInfo(id: "1", frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+                              visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 867))
+        let flank = ScreenInfo(id: "2", frame: CGRect(x: 1440, y: 0, width: 1920, height: 1080),
+                               visibleFrame: CGRect(x: 1440, y: 80, width: 1920, height: 1000))
+        let stack = ScreenInfo(id: "3", frame: CGRect(x: 0, y: 900, width: 1440, height: 900),
+                               visibleFrame: CGRect(x: 0, y: 900, width: 1440, height: 900))
+        let multis = [lead, flank, stack]
+
+        check("43-A: the menu-bar screen is found by its top inset, not by array order",
+              ScreenPicker.menuBarIndex([flank, lead]) == 1)
+        check("43-A: the pointer policy follows the pointer",
+              ScreenPicker.targetIndex(policy: .pointer, screens: multis,
+                                       pointer: CGPoint(x: 2000, y: 500), activeScreenID: nil) == 1)
+        check("43-A: a pointer on no screen falls back to the menu-bar screen",
+              ScreenPicker.targetIndex(policy: .pointer, screens: multis,
+                                       pointer: CGPoint(x: -500, y: -500), activeScreenID: nil) == 0)
+        check("43-A: the main policy takes the menu-bar screen",
+              ScreenPicker.targetIndex(policy: .main, screens: multis,
+                                       pointer: CGPoint(x: 2000, y: 500), activeScreenID: nil) == 0)
+        check("43-A: the active policy takes the frontmost app's screen",
+              ScreenPicker.targetIndex(policy: .active, screens: multis,
+                                       pointer: .zero, activeScreenID: "2") == 1)
+        check("43-A: an unknown frontmost screen falls back too",
+              ScreenPicker.targetIndex(policy: .active, screens: multis,
+                                       pointer: .zero, activeScreenID: "99") == 0)
+        check("43-A: the dock policy finds the screen the Dock reserves, not the menu-bar screen",
+              ScreenPicker.targetIndex(policy: .dock, screens: multis,
+                                       pointer: .zero, activeScreenID: nil) == 1)
+        check("43-A: a hidden Dock leaves no reserve, so the dock policy lands on the menu-bar screen",
+              ScreenPicker.dockIndex([lead, stack]) == nil
+              && ScreenPicker.targetIndex(policy: .dock, screens: [lead, stack],
+                                          pointer: .zero, activeScreenID: nil) == 0)
+        check("43-A: a left-hand Dock counts as reserved space",
+              ScreenPicker.dockIndex([ScreenInfo(id: "1",
+                                                 frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+                                                 visibleFrame: CGRect(x: 70, y: 0, width: 1370, height: 867))]) == 0)
+        check("43-A: no screens at all answers 0 instead of crashing",
+              ScreenPicker.targetIndex(policy: .dock, screens: [], pointer: .zero, activeScreenID: nil) == 0)
+
+        // 43-B: the deck must not list itself. Only the pure gate is asserted:
+        // a real-scan assertion ("the scan returns no OpenDeck") would be
+        // vacuously true on this machine — the build product sits outside every
+        // scan root, so the scan could not return it either way. The guard call
+        // inside `scan()` is therefore unobservable here, and is kept with that
+        // written on it (the X41 precedent), not papered over with a check that
+        // cannot fail.
+        //
+        // The real bundle id is asserted only inside `if let`, for the same
+        // reason: the harness environment has none, and a skipped check does not
+        // lie about a mutation.
+        // The gate's assertions use literal strings, not `Bundle.main
+        // .bundleIdentifier`: the mutation harness runs this binary from outside
+        // its .app, where Bundle.main has no bundle id — an assertion built on it
+        // fails there regardless of the mutation, and every entry in the registry
+        // would be "killed" by the same environment accident. (Seen live: the
+        // first 2a run killed all seven mutations, but the same two 43-B failures
+        // rode along on every one of them.)
+        check("43-B: an app whose bundle id is our own is excluded",
+              !AppScanner.shouldInclude(bundleID: "local.opendeck.app",
+                                        ownBundleID: "local.opendeck.app"))
+        check("43-B: a different app is kept",
+              AppScanner.shouldInclude(bundleID: "com.apple.Safari", ownBundleID: "local.opendeck.app"))
+        check("43-B: an app with no bundle id is still kept",
+              AppScanner.shouldInclude(bundleID: nil, ownBundleID: "local.opendeck.app"))
+        if let own = Bundle.main.bundleIdentifier {
+            check("43-B: the installed bundle's id is the one the gate excludes",
+                  own == "local.opendeck.app", own)
+        }
+
+        // 43-C: the two-icon trap.
+        let repaired = DockIconPolicy.resolveIcons(showDockIcon: false, showMenuBarIcon: false)
+        check("43-C: turning both icons off is repaired to keep the menu bar one",
+              repaired.dock == false && repaired.menuBar == true)
+        check("43-C: a Dock icon alone is left alone",
+              DockIconPolicy.resolveIcons(showDockIcon: true, showMenuBarIcon: false)
+                  == (dock: true, menuBar: false))
+        check("43-C: a menu bar icon alone is left alone",
+              DockIconPolicy.resolveIcons(showDockIcon: false, showMenuBarIcon: true)
+                  == (dock: false, menuBar: true))
+        check("43-C: both icons on is left alone",
+              DockIconPolicy.resolveIcons(showDockIcon: true, showMenuBarIcon: true)
+                  == (dock: true, menuBar: true))
+
+        section("Review 44 — Merge motion (decoded from LaunchOS)")
+
+        // 44-A: the constants are evidence, not taste. Both doubles were read
+        // out of the binary (report 44 §2): the scale from the
+        // CATransform3DMakeScale feeds at 0x1000e65a8/0x1000e6988, the duration
+        // from the setDuration: feeds at 0x1000e66e0/0x1000e6a9c, and both
+        // directions carry kCAMediaTimingFunctionEaseOut.
+        check("44-A: the merge scale is the decoded 0.8090169943749475 (phi/2)",
+              MergeMotion.scale == 0.8090169943749475)
+        check("44-A: the merge duration is the decoded 0.18 s",
+              MergeMotion.duration == 0.18)
+
+        // 54-A: the folder **open** motion is also evidence, not taste
+        // (report 54 §1). `0x10010df6c` sets the NSAnimationContext duration to
+        // 0x3fd1eb851eb851ec and the timing function to
+        // kCAMediaTimingFunctionEaseInEaseOut; the SwiftUI presentation uses
+        // `.easeInOut(duration:)`, the same curve family without a spring.
+        check("54-A: the open duration is the decoded 0.28 s",
+              OpenMotion.duration == 0.28)
+
+        // 54-B: the hidden badge's symbol ratio is the decoded 0.64
+        // (report 54 §2): `0x1000e5b9c` sizes the symbol at
+        // `0.64 × min(bounds)` inside the white circle. The diameter fraction
+        // is deliberately NOT pinned — it was never decoded.
+        check("54-B: the hidden badge symbol is the decoded 0.64 of the badge",
+              HiddenBadge.symbolFraction == 0.64)
+
+        // 54-C: the caption shadow is the decoded one (report 54 §3):
+        // black @ 0.26, blur 2, offset (0, -1) — from the NSShadow built at
+        // 0x100003f34. The old 0.85 alpha was the *text* colour's alpha from
+        // the label builder's alternate branch, not the shadow.
+        check("54-C: the caption shadow alpha is the decoded 0.26",
+              CaptionShadow.alpha == 0.26)
+        check("54-C: the caption shadow radius is the decoded 2",
+              CaptionShadow.radius == 2)
+        check("54-C: the caption shadow offset is the decoded (0, -1)",
+              CaptionShadow.offsetY == -1)
+
+        // 44-B: every folding path publishes one flash with a strictly
+        // increasing token, so two flashes on the same folder in a row still
+        // re-trigger the animation. The SwiftUI presentation that consumes the
+        // flash cannot be driven headlessly — the signal chain is what the
+        // suite pins, one mutation per site (M120–M126).
+        let flashURL = tempURL.deletingLastPathComponent()
+            .appendingPathComponent("opendeck-selftest-flash-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: flashURL) }
+        let fs = DeckStore(storeURL: flashURL)
+        fs.metrics = GridMetrics(columns: 3, rows: 3, iconSize: 100, cellWidth: 150, cellHeight: 150)
+        let fIDs = Array(fs.visibleApps.prefix(4)).map(\.id)
+        if fIDs.count == 4 {
+            check("44-B: an idle store has published no flash", fs.mergeFlash == nil)
+
+            fs.makeFolder(dropping: fIDs[0], onto: fIDs[1])
+            let fid = fs.folders.values.first { $0.appIDs.contains(fIDs[0]) }?.id
+            check("44-B: folding two loose apps flashes absorbed for the new folder",
+                  fs.mergeFlash?.kind == .absorbed && fs.mergeFlash?.folderID == fid,
+                  "\(String(describing: fs.mergeFlash))")
+            check("44-B: the first flash carries token 1", fs.mergeFlash?.token == 1)
+
+            fs.makeFolder(dropping: fIDs[2], onto: fIDs[1])
+            check("44-B: a second fold flashes again with an increased token",
+                  fs.mergeFlash?.kind == .absorbed
+                  && fs.mergeFlash?.folderID == fid
+                  && fs.mergeFlash?.token == 2)
+
+            fs.makeFolder(dropping: fIDs[0], onto: fIDs[1])
+            check("44-B: dropping a member onto its own folder is a no-op (no flash)",
+                  fs.mergeFlash?.token == 2)
+
+            _ = fs.addToFolder(fIDs[3], folder: fid!)
+            check("44-B: addToFolder flashes absorbed for that folder",
+                  fs.mergeFlash?.kind == .absorbed
+                  && fs.mergeFlash?.folderID == fid
+                  && fs.mergeFlash?.token == 3)
+            _ = fs.addToFolder(fIDs[3], folder: fid!)
+            check("44-B: adding a member twice publishes nothing",
+                  fs.mergeFlash?.token == 3)
+            _ = fs.addToFolder(fIDs[3], folder: UUID())
+            check("44-B: adding to an unknown folder publishes nothing",
+                  fs.mergeFlash?.token == 3)
+
+            // 44-C: releasing. `ungroup` and a dissolving `removeFromFolder`
+            // publish `.released` — the counterpart of LaunchOS's
+            // merge.scale.out (identity → 0.809, fade to 0, 0.18 s, ease-out).
+            fs.ungroup(fid!)
+            check("44-C: ungrouping flashes released for that folder",
+                  fs.mergeFlash?.kind == .released
+                  && fs.mergeFlash?.folderID == fid
+                  && fs.mergeFlash?.token == 4)
+            fs.ungroup(UUID())
+            check("44-C: ungrouping an unknown folder publishes nothing",
+                  fs.mergeFlash?.token == 4)
+
+            fs.makeFolder(dropping: fIDs[0], onto: fIDs[1])
+            let fid2 = fs.folders.values.first { $0.appIDs.contains(fIDs[0]) }?.id
+            let tDissolve = fs.mergeFlash!.token
+            fs.removeFromFolder(fIDs[0], folder: fid2!)
+            check("44-C: a removal that dissolves the folder flashes released",
+                  fs.mergeFlash?.kind == .released
+                  && fs.mergeFlash?.folderID == fid2
+                  && fs.mergeFlash?.token == tDissolve + 1)
+
+            fs.makeFolder(dropping: fIDs[0], onto: fIDs[1])
+            _ = fs.addToFolder(fIDs[2], folder: fs.folders.values.first { $0.appIDs.contains(fIDs[0]) }!.id)
+            let fid3 = fs.folders.values.first { $0.appIDs.contains(fIDs[0]) }!.id
+            let tKeep = fs.mergeFlash!.token
+            fs.removeFromFolder(fIDs[0], folder: fid3)
+            check("44-C: a removal that leaves two members publishes nothing",
+                  fs.mergeFlash?.token == tKeep)
+
+            // 44-D: moves and renames are not merge motion.
+            let tMove = fs.mergeFlash!.token
+            if let src = fs.locate(.app(fIDs[0])), fs.pages[src.section].count > 1 {
+                fs.move(itemAt: src, to: IndexPath(item: 0, section: src.section))
+            }
+            check("44-D: a grid move publishes no flash", fs.mergeFlash?.token == tMove)
+
+            // 44-G: the store mirror. The grid never observes DragState, so the
+            // drag host copies the value over (diffed) and FolderCell reads it
+            // here — the same channel shape as mergeFlash.
+            check("44-G: an untouched store has no drop-hover folder",
+                  fs.dropHoverFolderID == nil)
+            fs.setDropHoverFolder(fid)
+            check("44-G: the mirror publishes the hovered folder",
+                  fs.dropHoverFolderID == fid)
+            fs.setDropHoverFolder(nil)
+            check("44-G: clearing the mirror empties it",
+                  fs.dropHoverFolderID == nil)
+            let hoverCommitURL = tempURL.deletingLastPathComponent()
+                .appendingPathComponent("opendeck-selftest-hovercommit-\(UUID().uuidString).json")
+            defer { try? FileManager.default.removeItem(at: hoverCommitURL) }
+            let hoverStore = DeckStore(storeURL: hoverCommitURL)
+            hoverStore.pages = [[.app("a")]]
+            let hoverHost = DeckDragHost(store: hoverStore, vm: LaunchpadViewModel(store: hoverStore))
+            hoverStore.setDropHoverFolder(UUID())
+            hoverHost.commit()
+            check("44-G: a release clears the drop-hover folder even when nothing folds",
+                  hoverStore.dropHoverFolderID == nil)
+            hoverHost.teardown()
+        } else {
+            check("at least four apps for the merge-motion test", false)
+        }
+
+
+
+        section("Review 45 — Drop-hover zoom (decoded from LaunchOS)")
+
+        // 44-E: the drop-hover zoom is a measurement too. 0x1000171d4 feeds
+        // 0x3FF0CCCCCCCCCCCD (= 1.05) into CATransform3DMakeScale and then
+        // straight into setTransform: — implicit animation, centre-anchored,
+        // the tile grows in place. The 1.4 family belongs to the open panel,
+        // not the tile.
+        check("44-E: the drop-hover zoom is the decoded 1.05",
+              MergeMotion.hoverZoom == 1.05)
+
+        // 44-F: the drop-hover signal chain in DragState — the same state
+        // machine that decides the fold, published per move. Drivable
+        // headlessly the same way as the reflow test above.
+        let hoverMetrics = GridMetrics(columns: 3, rows: 3, iconSize: 100, cellWidth: 150, cellHeight: 150)
+        let hoverFrame = CGRect(x: 0, y: 0, width: 450, height: 450)
+        let hoverTester = GridHitTester(metrics: hoverMetrics, itemCount: 4,
+                                        containerSize: hoverFrame.size,
+                                        slotCount: hoverMetrics.capacity)
+        let hoverFID = UUID()
+        let hoverItems: [DeckSlot] = [.app("a"), .folder(hoverFID), .app("b"), .app("c")]
+        let hover = DragState()
+        hover.gridFrame = hoverFrame
+        let overFolder = hoverTester.centre(of: 1)
+        hover.begin(item: .app("a"), app: nil, title: nil, index: 0, page: 0,
+                    source: .grid, location: CGPoint(x: overFolder.x, y: overFolder.y))
+        hover.update(location: CGPoint(x: overFolder.x, y: overFolder.y),
+                     page: 0, metrics: hoverMetrics, pageItems: hoverItems,
+                     capacity: hoverMetrics.capacity)
+        check("44-F: hovering a folder names it as the drop target",
+              hover.combineFolderID == hoverFID, String(describing: hover.combineFolderID))
+        let overApp = hoverTester.centre(of: 2)
+        hover.update(location: CGPoint(x: overApp.x, y: overApp.y),
+                     page: 0, metrics: hoverMetrics, pageItems: hoverItems,
+                     capacity: hoverMetrics.capacity)
+        check("44-F: moving off the folder clears the drop target",
+              hover.combineFolderID == nil, String(describing: hover.combineFolderID))
+        hover.update(location: CGPoint(x: overFolder.x, y: overFolder.y),
+                     page: 0, metrics: hoverMetrics, pageItems: hoverItems,
+                     capacity: hoverMetrics.capacity)
+        hover.reset()
+        check("44-F: resetting the drag clears the drop target",
+              hover.combineFolderID == nil)
+
+        // 45: the same chain for a merge over an **app** tile, plus the
+        // out-of-grid exit the 44-F block does not cover.
+        let mergeItems: [DeckSlot] = [.app("x"), .app("y"), .folder(hoverFID)]
+        let appMerger = DragState()
+        appMerger.gridFrame = hoverFrame
+        let mergeCentre = hoverTester.centre(of: 0)
+        appMerger.begin(item: .app("w"), app: nil, title: nil, index: 0, page: 0,
+                     source: .grid, location: mergeCentre)
+        appMerger.update(location: mergeCentre, page: 0, metrics: hoverMetrics,
+                      pageItems: mergeItems, capacity: hoverMetrics.capacity)
+        check("45: hovering an app tile names it as the merge target",
+              appMerger.combineAppID == "x" && appMerger.combineFolderID == nil,
+              "\(String(describing: appMerger.combineAppID)) / \(String(describing: appMerger.combineFolderID))")
+        appMerger.update(location: CGPoint(x: -50, y: -50), page: 0, metrics: hoverMetrics,
+                      pageItems: mergeItems, capacity: hoverMetrics.capacity)
+        check("45: leaving the grid clears the merge signals",
+              appMerger.combineAppID == nil && appMerger.combineFolderID == nil)
+        appMerger.reset()
+        check("45: resetting clears the merge signal", appMerger.combineAppID == nil)
+
+        section("Review 46 — Pull-out (the member drag leaves the panel)")
+
+        // 46-A: the exit test is pure geometry over the panel's **visible**
+        // bounds — the registered grid box inset by the plate's padding. The
+        // padding band pins the inset direction: a mutation dropping the inset
+        // (or flipping its sign) moves the boundary and fails here.
+        let panelRect = CGRect(x: 200, y: 150, width: 400, height: 300)
+        check("46-A: the pointer inside the panel has not exited",
+              !DragState.exitedPanel(pointer: CGPoint(x: 400, y: 300),
+                                     panelFrame: panelRect, padding: 30))
+        check("46-A: the pointer in the padding band has not exited",
+              !DragState.exitedPanel(pointer: CGPoint(x: 180, y: 300),
+                                     panelFrame: panelRect, padding: 30))
+        check("46-A: the pointer just past the plate has exited",
+              DragState.exitedPanel(pointer: CGPoint(x: 160, y: 300),
+                                    panelFrame: panelRect, padding: 30))
+
+        // 46-B: the promotion. The member contract at the release is
+        // "place, never fold" (`drop` gates the combine on `.grid` on
+        // purpose); once the drag is promoted the same state folds. That flip
+        // is the whole semantic of the pull-out, asserted on both sides.
+        let promo = DragState()
+        promo.gridFrame = hoverFrame
+        promo.begin(item: .app("w"), app: nil, title: nil, index: 0, page: 0,
+                    source: .folderMember(hoverFID), location: mergeCentre)
+        promo.update(location: mergeCentre, page: 0, metrics: hoverMetrics,
+                     pageItems: mergeItems, capacity: hoverMetrics.capacity)
+        check("46-B: a member release over a tile places, never folds",
+              promo.drop(metrics: hoverMetrics, pageItems: mergeItems) == .toIndex(0))
+        promo.promoteToGrid()
+        check("46-B: the promoted release folds — the grid gating follows the promotion",
+              promo.drop(metrics: hoverMetrics, pageItems: mergeItems) == .combine(.app("x")))
+        promo.promoteToGrid()
+        check("46-B: a second promotion changes nothing", promo.source == .grid)
+        promo.reset()
+
+        // 46-C: the effect, through the real host. Inside the panel nothing
+        // happens; past the plate the member joins the grid **now**, the panel
+        // is asked to collapse (the light teardown — the store's drag session
+        // stays open until the commit), the drag is promoted, and the very
+        // next move slides the gap — the "keeps sorting on the desktop" half.
+        let pullURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("opendeck-pullout-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: pullURL) }
+        let pullStore = DeckStore(storeURL: pullURL)
+        pullStore.metrics = GridMetrics(columns: 4, rows: 2, iconSize: 64,
+                                        cellWidth: 88, cellHeight: 92)
+        let pullFID = UUID()
+        pullStore.folders[pullFID] = AppFolder(id: pullFID, name: "F",
+                                               appIDs: ["m1", "m2", "m3"])
+        pullStore.pages = [[.folder(pullFID), .app("g1"), .app("g2")]]
+        let pullVM = LaunchpadViewModel(store: pullStore)
+        let pullHost = DeckDragHost(store: pullStore, vm: pullVM)
+        pullHost.drag.gridFrame = CGRect(x: 0, y: 0, width: 800, height: 400)
+        pullHost.offset.begin(scrollOffset: 0, pageWidth: 1200, pageCount: 1)
+        // The panel sits far from the grid, so every tile centre is past it.
+        pullVM.openedFolder = pullFID
+        pullVM.folderPanel = FolderPanelLayout(frame: CGRect(x: 1200, y: 600, width: 200, height: 120),
+                                               columns: 2, cellWidth: 74, cellHeight: 77,
+                                               hSpacing: 6, vSpacing: 6)
+        let pullTester = GridHitTester(metrics: pullStore.metrics, itemCount: 3,
+                                       containerSize: pullHost.drag.gridFrame.size,
+                                       slotCount: pullStore.metrics.capacity)
+        pullHost.drag.begin(item: .app("m1"), app: nil, title: "M1", index: 0, page: 0,
+                            source: .folderMember(pullFID), location: .zero)
+        // Inside the panel: nothing moves.
+        pullHost.pullOutIfExited(at: CGPoint(x: 1300, y: 660))
+        check("46-C: a pointer still inside the panel leaves everything alone",
+              pullStore.folder(pullFID)?.appIDs == ["m1", "m2", "m3"]
+              && !pullVM.folderMinimizing && pullHost.drag.sourceFolder == pullFID,
+              "\(String(describing: pullStore.folder(pullFID)?.appIDs)) / \(pullVM.folderMinimizing)")
+        // Past the plate, over tile 1: the member joins the grid at the hover.
+        pullHost.drag.update(location: pullTester.centre(of: 1), page: 0,
+                             metrics: pullStore.metrics, pageItems: pullStore.pages[0],
+                             capacity: pullStore.metrics.capacity)
+        pullHost.pullOutIfExited(at: pullTester.centre(of: 1))
+        check("46-C: the exit moves the member onto the grid at the hovered cell",
+              pullStore.pages[0] == [.folder(pullFID), .app("m1"), .app("g1"), .app("g2")],
+              "\(pullStore.pages[0])")
+        check("46-C: the folder keeps its other members",
+              pullStore.folder(pullFID)?.appIDs == ["m2", "m3"],
+              pullStore.folder(pullFID).map { "\($0.appIDs)" } ?? "dissolved")
+        check("46-C: the panel is collapsing through the light teardown",
+              pullVM.folderMinimizing && pullVM.openedFolder == pullFID)
+        check("46-C: the drag is now an ordinary grid drag",
+              pullHost.drag.source == .grid && pullHost.drag.sourceFolder == nil)
+        // ... and the next move slides the gap: the desktop keeps sorting.
+        pullHost.drag.update(location: pullTester.centre(of: 5), page: 0,
+                             metrics: pullStore.metrics, pageItems: pullStore.pages[0],
+                             capacity: pullStore.metrics.capacity)
+        check("46-C: the reflow follows the promoted drag across the grid",
+              pullStore.locate(.app("m1")) == IndexPath(item: 3, section: 0),
+              String(describing: pullStore.locate(.app("m1"))))
+        // An exit **off** the grid (no hover) lands the member at the page tail.
+        let tailURL = tempFile("pullout-tail")
+        defer { sweep(tailURL, "pullout-tail") }
+        let tailStore = DeckStore(storeURL: tailURL)
+        tailStore.metrics = pullStore.metrics
+        let tailFID = UUID()
+        tailStore.folders[tailFID] = AppFolder(id: tailFID, name: "T",
+                                               appIDs: ["m1", "m2", "m3"])
+        tailStore.pages = [[.folder(tailFID), .app("g1"), .app("g2")]]
+        let tailVM = LaunchpadViewModel(store: tailStore)
+        let tailHost = DeckDragHost(store: tailStore, vm: tailVM)
+        tailHost.drag.gridFrame = CGRect(x: 0, y: 0, width: 800, height: 400)
+        tailHost.offset.begin(scrollOffset: 0, pageWidth: 1200, pageCount: 1)
+        tailVM.openedFolder = tailFID
+        tailVM.folderPanel = FolderPanelLayout(frame: CGRect(x: 1200, y: 600, width: 200, height: 120),
+                                               columns: 2, cellWidth: 74, cellHeight: 77,
+                                               hSpacing: 6, vSpacing: 6)
+        tailHost.drag.begin(item: .app("m1"), app: nil, title: "M1", index: 0, page: 0,
+                            source: .folderMember(tailFID), location: .zero)
+        tailHost.pullOutIfExited(at: CGPoint(x: 400, y: 380)) // off-grid exit: no hover
+        check("46-C: an exit off the grid lands the member at the page tail",
+              tailStore.locate(.app("m1")) == IndexPath(item: 3, section: 0),
+              String(describing: tailStore.locate(.app("m1"))))
+        tailHost.teardown()
+        pullHost.teardown()
+        // The writes the pull-out made were held by the still-open drag
+        // session (`save()` inside a batch defers); the teardown's
+        // `endDragSession` flushes them. The disk file is the witness that the
+        // session really survived the exit — the light teardown's whole point.
+        let flushed = (try? Data(contentsOf: pullURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let flushedPages = flushed?["pages"] as? [[String]] ?? []
+        check("46-C: the session survived the exit — the writes flush at teardown",
+              flushedPages.first?.contains("app:m1") == true,
+              "\(flushedPages)")
+
+        // MARK: - Review 47: settings over the deck
+
+        section("Review 47 — settings does not take the deck down")
+
+        // Opening settings must not hide the deck: LaunchOS's `openPreferences`
+        // (`0x10011f650`) only dispatches its preferences window, nothing hides
+        // the launchpad. So the deck stays up and the panel has to be raised
+        // above it — a `.normal` window behind a full-screen level-499 deck is
+        // simply invisible. The rule is pure; the window it feeds is not
+        // driveable headlessly.
+        let deckPanelLevel = LaunchpadWindowController.deckWindowLevel
+        let raisedAfterDeck = SettingsPanelLevel.resolve(deckVisible: true, deckLevel: deckPanelLevel)
+        check("47-A: the settings panel is raised above the deck",
+              raisedAfterDeck.map { $0.rawValue > deckPanelLevel.rawValue } ?? false)
+        check("47-A: raised by exactly one level",
+              raisedAfterDeck?.rawValue == deckPanelLevel.rawValue + 1)
+        // **At most** the level AppKit puts the dragged icon at (measured 500):
+        // the icon in the air has to stay on top. Equality is allowed and is
+        // what actually happens — there is no integer level between the deck
+        // (499) and the drag image (500), and the two cannot coexist anyway (a
+        // drag holds the button down, so the settings button is unreachable).
+        check("47-A: the panel never rises above the dragging level",
+              (raisedAfterDeck?.rawValue ?? Int.max) <= Int(CGWindowLevelForKey(.draggingWindow)))
+        // No deck on screen — the menu-bar route opens settings with the deck
+        // away. Nothing to be above, and forcing a level would float an ordinary
+        // window over the Dock and the menu bar.
+        check("47-A: with no deck the level is left alone",
+              SettingsPanelLevel.resolve(deckVisible: false, deckLevel: deckPanelLevel) == nil)
+
+        // MARK: - Review 49: the caption follows the icon scale
+
+        section("Review 49 — the app name scales with the icon scale")
+
+        // LaunchOS reads the caption's point size off a base font object rather
+        // than naming one (`0x100126d6c` → `pointSize`, then `setFontSize:` at
+        // `0x100126d78`). OpenDeck pinned 13 pt while `iconScale` moved the icons
+        // underneath it. The first cut of this fix derived the size from
+        // `metrics.iconSize`; that input is mostly the **display's** decision, so
+        // the default preset on a 1512 pt-wide screen asked for a 10 pt caption.
+        // The input is the user's scale — see `LabelMetrics`.
+        check("49-A: 100 % keeps the size the deck has always drawn",
+              LabelMetrics.pointSize(scale: IconScale.default) == LabelMetrics.referencePointSize,
+              "\(LabelMetrics.pointSize(scale: IconScale.default))")
+        check("49-A: a larger scale gets a larger caption",
+              LabelMetrics.pointSize(scale: IconScale.maximum)
+                > LabelMetrics.pointSize(scale: IconScale.default),
+              "\(LabelMetrics.pointSize(scale: IconScale.maximum))")
+        check("49-A: a smaller scale gets a smaller caption",
+              LabelMetrics.pointSize(scale: IconScale.minimum)
+                < LabelMetrics.pointSize(scale: IconScale.default),
+              "\(LabelMetrics.pointSize(scale: IconScale.minimum))")
+        // The regression this correction exists for: a display that hands the
+        // grid 86 pt icons must not shrink the name.
+        check("49-A: the caption ignores the icon's measured size",
+              GridMetrics(columns: 7, rows: 5, iconSize: 86,
+                          cellWidth: 183, cellHeight: 140).captionPointSize
+                == LabelMetrics.referencePointSize,
+              "\(GridMetrics(columns: 7, rows: 5, iconSize: 86, cellWidth: 183, cellHeight: 140).captionPointSize)")
+        // ... and it does follow the scale the grid was built with.
+        check("49-A: the caption follows the grid's scale",
+              GridMetrics(columns: 7, rows: 5, iconSize: 120, cellWidth: 183, cellHeight: 140,
+                          iconScale: IconScale.maximum).captionPointSize == 18,
+              "\(GridMetrics(columns: 7, rows: 5, iconSize: 120, cellWidth: 183, cellHeight: 140, iconScale: IconScale.maximum).captionPointSize)")
+        // Readability floors: never shrinks out of legibility, never grows to
+        // where two lines stop fitting the caption band.
+        check("49-A: the caption has a readable floor",
+              LabelMetrics.pointSize(scale: 0.1) == LabelMetrics.minimumPointSize)
+        check("49-A: the caption has a ceiling",
+              LabelMetrics.pointSize(scale: 3) == LabelMetrics.maximumPointSize)
+        // The metrics are built before the settings have been read; a zero-point
+        // caption would be invisible rather than merely wrong.
+        check("49-A: an unmeasured scale keeps the reference size",
+              LabelMetrics.pointSize(scale: 0) == LabelMetrics.referencePointSize)
+        // The press target has to keep covering the caption it is drawn around.
+        check("49-A: the caption block grows with the caption",
+              LabelMetrics.hitBlock(scale: IconScale.maximum)
+                > LabelMetrics.hitBlock(scale: IconScale.default))
+        check("49-A: the caption block is unchanged at 100 %",
+              LabelMetrics.hitBlock(scale: IconScale.default) == 48)
+
+        // MARK: - Review 51: the uninstall panel is above the deck
+
+        section("Review 51 — the uninstall panel sits above the deck")
+
+        // The panel is opened from the deck's own context menu, so the deck it
+        // was opened from is on screen behind it. LaunchOS's presenter writes
+        // `.screenSaver + 1` (`0x1000248ac`) — a fixed level above everything —
+        // not `.floating` (3), which is below this deck's 499 and drew the panel
+        // the user had just asked for underneath the window they asked from it.
+        let uninstallDeckLevel = LaunchpadWindowController.deckWindowLevel
+        check("51-A: the panel is above the deck",
+              UninstallPanelLevel.panel.rawValue > uninstallDeckLevel.rawValue,
+              "\(UninstallPanelLevel.panel.rawValue) vs \(uninstallDeckLevel.rawValue)")
+        // Pinned to the measured literal: LaunchOS's decoded value is 1000 + 1,
+        // and the literal also catches the system moving `.screenSaver` under us.
+        check("51-A: the panel is at LaunchOS's own level",
+              UninstallPanelLevel.panel.rawValue == 1001,
+              "\(UninstallPanelLevel.panel.rawValue)")
+
+        // MARK: - Review 50: the caption is the name the system shows
+
+        section("Review 50 — an app's name comes from the file manager")
+
+        // LaunchOS resolves the caption with `displayNameAtPath:` (`0x1000b5608`
+        // → `0x1000b56d8`). Measured over 125 bundles on this machine, the plist
+        // rule disagrees with that answer for **all of them**; the ones that are
+        // not just an extension are names like this one.
+        check("50-A: the file manager's name wins over the plist",
+              AppNaming.displayName(localizedDisplayName: nil,
+                                    finderDisplayName: "Voice Memos",
+                                    bundleDisplayName: "VoiceMemos",
+                                    bundleName: "VoiceMemos",
+                                    fallback: "VoiceMemos") == "Voice Memos")
+        // The API honours "show all filename extensions" (measured on for this
+        // machine), so its answer carries the bundle extension. Neither the
+        // system Launchpad's captions nor a deck's end in ".app".
+        check("50-A: a trailing .app is dropped",
+              AppNaming.displayName(localizedDisplayName: nil,
+                                    finderDisplayName: "Siri.app",
+                                    bundleDisplayName: nil,
+                                    bundleName: nil,
+                                    fallback: "Siri") == "Siri")
+        check("50-A: only the bundle extension is dropped",
+              AppNaming.displayName(localizedDisplayName: nil,
+                                    finderDisplayName: "Lavender Quartz 境界秤動.app",
+                                    bundleDisplayName: nil,
+                                    bundleName: nil,
+                                    fallback: "x") == "Lavender Quartz 境界秤動")
+        // A bundle literally named `.app` must not strip to an empty caption.
+        check("50-A: a bundle named .app keeps a caption",
+              AppNaming.displayName(localizedDisplayName: nil,
+                                    finderDisplayName: ".app",
+                                    bundleDisplayName: nil,
+                                    bundleName: nil,
+                                    fallback: ".app") == ".app")
+        // Fallbacks, for a bundle whose display name cannot be resolved.
+        check("50-A: the plist answers when the file manager cannot",
+              AppNaming.displayName(localizedDisplayName: nil,
+                                    finderDisplayName: nil,
+                                    bundleDisplayName: nil,
+                                    bundleName: "Chess",
+                                    fallback: "com.apple.Chess") == "Chess")
+        check("50-A: a blank display name falls through to the next source",
+              AppNaming.displayName(localizedDisplayName: nil,
+                                    finderDisplayName: "   ",
+                                    bundleDisplayName: "",
+                                    bundleName: nil,
+                                    fallback: "Something") == "Something")
+
+        // MARK: - Review 55: the caption is the *localised* name
+
+        // MARK: - Review 56: display and browsing modes (batch E)
+
+        section("Review 56 — display mode and browsing style")
+
+        // The deck window's whole configuration comes from one pure decision
+        // (report 56 §5), so both modes are assertable without a window server.
+        let fullStyle = DeckWindowStyleResolver.style(for: .fullScreen,
+                                                      screen: CGSize(width: 1512, height: 982))
+        check("56-E: full screen covers the screen at the deck's own level",
+              fullStyle.fullScreen
+              && fullStyle.contentSize == CGSize(width: 1512, height: 982)
+              && fullStyle.usesDeckLevel
+              && !fullStyle.movableByBackground
+              && !fullStyle.hasShadow,
+              "\(fullStyle)")
+
+        let windowStyle = DeckWindowStyleResolver.style(for: .window,
+                                                        screen: CGSize(width: 1512, height: 982))
+        check("56-E: window mode is a normal window, not a levelled overlay",
+              !windowStyle.fullScreen
+              && !windowStyle.usesDeckLevel
+              && windowStyle.movableByBackground
+              && windowStyle.hasShadow,
+              "\(windowStyle)")
+        check("56-E: window mode takes 74% of the screen",
+              windowStyle.contentSize == CGSize(width: 1119, height: 727),
+              "\(windowStyle.contentSize)")
+        // A display too small for the fraction still gets a usable window; an
+        // enormous one is capped so the deck cannot become a second full screen.
+        check("56-E: a tiny screen gets the minimum window",
+              DeckWindowStyleResolver.style(for: .window,
+                                            screen: CGSize(width: 400, height: 300)).contentSize
+                  == DeckWindowStyleResolver.minWindowSize)
+        check("56-E: an enormous screen gets the capped window",
+              DeckWindowStyleResolver.style(for: .window,
+                                            screen: CGSize(width: 6000, height: 4000)).contentSize
+                  == DeckWindowStyleResolver.maxWindowSize)
+
+        // Browsing style: the deck's pages are laid out as one column in
+        // scroll mode, so the indicators and the sideways swipe go away.
+        check("56-F: paged shows the dots, scroll does not",
+              BrowsingStyle.paged.showsPageDots && !BrowsingStyle.scroll.showsPageDots)
+        check("56-F: only paged swipes between pages",
+              BrowsingStyle.paged.pagesWithHorizontalSwipe
+              && !BrowsingStyle.scroll.pagesWithHorizontalSwipe)
+        check("56-F: the labels are LaunchOS's",
+              BrowsingStyle.paged.label == "Paged" && BrowsingStyle.scroll.label == "Scroll")
+        check("56-F: the display mode labels are LaunchOS's",
+              DisplayMode.fullScreen.label == "Full Screen" && DisplayMode.window.label == "Window")
+
+        // MARK: - Review 56: Add to Dock / backups / uninstall mode (batch D)
+
+        section("Review 56 — add to dock appends one tile, once")
+
+        // The decoded flow (report 56 §1): read com.apple.dock
+        // persistent-apps, append the app's file tile, write back, `killall
+        // Dock`. The tile shape is the Dock's own minimal form.
+        let tile = DockSync.addingApp(urlString: "file:///Applications/TencentMeeting.app/",
+                                      to: [])
+        check("56-A: the tile is the Dock's minimal file-tile form",
+              tile.count == 1
+              && (tile[0]["tile-type"] as? String) == "file-tile"
+              && (((tile[0]["tile-data"] as? [String: Any])?["file-data"] as? [String: Any])?["_CFURLString"] as? String)
+                  == "file:///Applications/TencentMeeting.app/",
+              "\(tile)")
+        check("56-A: an app already in the dock is not added twice",
+              DockSync.addingApp(urlString: "file:///Applications/TencentMeeting.app/",
+                                 to: tile).count == 1)
+        check("56-A: a second app joins the first",
+              DockSync.addingApp(urlString: "file:///Applications/WeChat.app/",
+                                 to: tile).count == 2)
+        // The trailing slash the Dock writes must not defeat the check.
+        check("56-A: the trailing slash does not defeat dedup",
+              DockSync.contains(urlString: "file:///Applications/TencentMeeting.app",
+                                in: tile))
+        check("56-A: a different app is not reported present",
+              !DockSync.contains(urlString: "file:///Applications/Other.app/", in: tile))
+
+        // 56-B: "Hold Option for Uninstall" (report 56 §4). The decoded
+        // binary tests bit 18 (control) while both its strings name Option;
+        // OpenDeck follows the documented modifier.
+        check("56-B: Option arms uninstall mode",
+              UninstallMode.isActive(modifierFlags: [.option]))
+        check("56-B: Option with others still arms it",
+              UninstallMode.isActive(modifierFlags: [.option, .command, .shift]))
+        check("56-B: a plain click does not",
+              !UninstallMode.isActive(modifierFlags: []))
+        check("56-B: Command alone does not",
+              !UninstallMode.isActive(modifierFlags: [.command]))
+        check("56-B: the documented modifier is Option, not Control",
+              NSEvent.ModifierFlags.option.rawValue == 1 << 19
+              && NSEvent.ModifierFlags.control.rawValue == 1 << 18)
+
+        // 56-C: Export / Import Backup (report 56 §3). The container is pure —
+        // header + the layout file's verbatim bytes — so the round trip and
+        // every refusal are assertable headlessly.
+        let layoutFixture = Data(#"{"pages":[["app:a","app:b"]],"folders":[],"hidden":[],"customOrder":["a","b"]}"#.utf8)
+        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let backupData = LayoutBackup.make(layoutData: layoutFixture,
+                                           appCount: 2, pageCount: 1, exportedAt: stamp)
+        check("56-C: a backup can be built", backupData != nil)
+        if let backupData {
+            let header = LayoutBackup.summary(backupData)
+            check("56-C: the header carries format, version and counts",
+                  header?.format == LayoutBackup.formatMarker
+                  && header?.version == LayoutBackup.formatVersion
+                  && header?.appCount == 2
+                  && header?.pageCount == 1
+                  && header?.exportedAt == ISO8601DateFormatter().string(from: stamp),
+                  "\(String(describing: header))")
+            if case .success(let payload) = LayoutBackup.parse(backupData) {
+                check("56-C: the round trip returns the very same bytes",
+                      payload == layoutFixture)
+            } else {
+                check("56-C: the round trip returns the very same bytes", false)
+            }
+        }
+
+        // Every refusal path, with LaunchOS's own wording.
+        if case .failure(let error) = LayoutBackup.parse(Data("not json".utf8)) {
+            check("56-C: a foreign file is refused", error == .notABackup)
+        } else {
+            check("56-C: a foreign file is refused", false)
+        }
+        let wrongMarker = Data(#"{"format":"Something.Else","version":1,"exportedAt":"x","appCount":0,"pageCount":0,"payload":"{}"}"#.utf8)
+        if case .failure(let error) = LayoutBackup.parse(wrongMarker) {
+            check("56-C: another app's JSON is refused", error == .notABackup)
+        } else {
+            check("56-C: another app's JSON is refused", false)
+        }
+        let futureVersion = Data(#"{"format":"OpenDeck.LayoutBackup","version":99,"exportedAt":"x","appCount":0,"pageCount":0,"payload":"{}"}"#.utf8)
+        if case .failure(let error) = LayoutBackup.parse(futureVersion) {
+            check("56-C: a newer backup version is refused",
+                  error == .unsupportedVersion(99), "\(error)")
+        } else {
+            check("56-C: a newer backup version is refused", false)
+        }
+        let emptyPayload = Data(#"{"format":"OpenDeck.LayoutBackup","version":1,"exportedAt":"x","appCount":0,"pageCount":0,"payload":"   "}"#.utf8)
+        if case .failure(let error) = LayoutBackup.parse(emptyPayload) {
+            check("56-C: an empty payload is refused", error == .missingPayload)
+        } else {
+            check("56-C: an empty payload is refused", false)
+        }
+
+        // The store half: adoption validates before it touches anything.
+        let bakURL = tempURL.deletingLastPathComponent()
+            .appendingPathComponent("opendeck-selftest-backup-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: bakURL) }
+        let bak = DeckStore(storeURL: bakURL)
+        bak.metrics = GridMetrics(columns: 2, rows: 2, iconSize: 100, cellWidth: 150, cellHeight: 150)
+        let bakIDs = Array(bak.visibleApps.prefix(2)).map(\.id)
+        if bakIDs.count == 2 {
+            let before = bak.pages
+            let goodPayload = Data(#"{"pages":[["app:\#(bakIDs[0])","app:\#(bakIDs[1])"]],"folders":[],"hidden":[],"customOrder":[]}"#.utf8)
+            let adopted = bak.adoptBackupPayload(goodPayload)
+            // `reconcile()` runs inside the adoption (exactly as it does on
+            // load), so the page may afterwards hold more than the payload's
+            // two items — what the adoption promises is that the payload's own
+            // arrangement is in place.
+            let flatAfter = bak.pages.flatMap { $0 }
+            check("56-C: a good payload is adopted",
+                  adopted
+                  && flatAfter.first == .app(bakIDs[0])
+                  && flatAfter.dropFirst().first == .app(bakIDs[1]),
+                  "adopted=\(adopted) first=\(flatAfter.prefix(3))")
+            let countBefore = bak.pages.count
+            check("56-C: a garbage payload changes nothing",
+                  !bak.adoptBackupPayload(Data("{}".utf8))
+                  && bak.pages.count == countBefore)
+            check("56-C: an empty-pages payload is refused",
+                  !bak.adoptBackupPayload(Data(#"{"pages":[],"folders":[],"hidden":[],"customOrder":[]}"#.utf8))
+                  && bak.pages.count == countBefore,
+                  "\(bak.pages.count)")
+            _ = before
+        } else {
+            check("at least two apps for the backup test", false)
+        }
+
+        section("Review 55 — the localised plist name outranks everything")
+        // The bug this section exists for: LaunchOS shows 腾讯会议 for
+        // /Applications/TencentMeeting.app while the old chain answered
+        // "TencentMeeting" — the base plist's CFBundleDisplayName, and also
+        // what `displayNameAtPath:` answers on this machine (measured: the API
+        // returns the folder name in CLI, GUI, open-launched and sandboxed
+        // processes alike; it does not localise here).
+        check("55-A: the localised name outranks the finder name",
+              AppNaming.displayName(localizedDisplayName: "腾讯会议",
+                                    finderDisplayName: "TencentMeeting.app",
+                                    bundleDisplayName: "TencentMeeting",
+                                    bundleName: "腾讯会议",
+                                    fallback: "TencentMeeting") == "腾讯会议")
+        check("55-A: the localised name outranks the base plist",
+              AppNaming.displayName(localizedDisplayName: "微信",
+                                    finderDisplayName: "WeChat.app",
+                                    bundleDisplayName: "WeChat",
+                                    bundleName: "WeChat",
+                                    fallback: "WeChat") == "微信")
+        // A blank localised name must not shadow the finder answer.
+        check("55-A: a blank localised name falls through",
+              AppNaming.displayName(localizedDisplayName: "   ",
+                                    finderDisplayName: "Voice Memos",
+                                    bundleDisplayName: "VoiceMemos",
+                                    bundleName: "VoiceMemos",
+                                    fallback: "VoiceMemos") == "Voice Memos")
+
+        // The matching is Foundation's own, pinned to the TencentMeeting
+        // fixture: a zh-Hans-HK user with the bundle's zh-Hant/zh-HK tables
+        // carrying the *English* name must land on zh-Hans (script match beats
+        // region-only), not on zh-HK.
+        check("55-B: a zh-Hans-HK user matches the bundle's zh-Hans",
+              Bundle.preferredLocalizations(
+                  from: ["zh-Hans", "en", "zh-HK", "zh-Hant"],
+                  forPreferences: ["zh-Hans-HK", "en-HK", "zh-Hant-HK"]
+              ).first == "zh-Hans",
+              "\(Bundle.preferredLocalizations(from: ["zh-Hans", "en", "zh-HK", "zh-Hant"], forPreferences: ["zh-Hans-HK", "en-HK", "zh-Hant-HK"]))")
+        check("55-B: an English user matches the bundle's en",
+              Bundle.preferredLocalizations(
+                  from: ["zh-Hans", "en", "zh-HK", "zh-Hant"],
+                  forPreferences: ["en"]
+              ).first == "en")
+
+        // The loader-driven resolution, headless: first matched table with a
+        // CFBundleDisplayName wins; CFBundleName is the key fallback inside a
+        // table; a table that cannot be loaded is skipped, not fatal.
+        let tables55: [String: [String: String]] = [
+            "zh-HK": ["CFBundleDisplayName": "TencentMeeting"],
+            "zh-Hans": ["CFBundleDisplayName": "腾讯会议"],
+        ]
+        check("55-B: the first matched table's display name wins",
+              AppNaming.localizedDisplayName(
+                  localizations: ["zh-Hans", "en", "zh-HK", "zh-Hant"],
+                  preferences: ["zh-Hans-HK", "en-HK"],
+                  loadTable: { tables55[$0] }
+              ) == "腾讯会议")
+        check("55-B: CFBundleName is the in-table fallback",
+              AppNaming.localizedDisplayName(
+                  localizations: ["en"],
+                  preferences: ["en"],
+                  loadTable: { _ in ["CFBundleName": "微信"] }
+              ) == "微信")
+        // Foundation's matcher returns a **single** best localization, not a
+        // fallback chain (measured: ["zh-Hans","en"] + ["zh-Hans","en"] →
+        // ["zh-Hans"]). So an unreadable table means "no localized name", and
+        // `displayName` falls through to the finder answer — pinned here so the
+        // single-match behaviour cannot silently become a chain.
+        check("55-B: the matcher picks one best localization",
+              Bundle.preferredLocalizations(
+                  from: ["zh-Hans", "en"], forPreferences: ["zh-Hans", "en"]
+              ) == ["zh-Hans"])
+        check("55-B: an unreadable table yields no localized name",
+              AppNaming.localizedDisplayName(
+                  localizations: ["zh-Hans", "en"],
+                  preferences: ["zh-Hans", "en"],
+                  loadTable: { (_: String) -> [String: String]? in nil }
+              ) == nil)
+
+        // The end-to-end pin, on the machine the report is named after: the
+        // real bundle, through the real loader. Guarded because another
+        // machine may not have it installed.
+        let tencentPath = "/Applications/TencentMeeting.app"
+        if FileManager.default.fileExists(atPath: tencentPath),
+           let bundle = Bundle(path: tencentPath) {
+            check("55-C: the real TencentMeeting bundle resolves to 腾讯会议",
+                  AppNaming.localizedDisplayName(bundle: bundle) == "腾讯会议",
+                  "\(String(describing: AppNaming.localizedDisplayName(bundle: bundle)))")
+        } else {
+            check("55-C: TencentMeeting not installed — skipped", true)
+        }
+
+        // The uninstaller must keep finding leftovers named after the bundle
+        // now that the caption is localised (report 55 §2).
+        check("55-D: leftovers match every spelling of the name",
+              AppUninstaller.nameNeedles(name: "腾讯会议",
+                                         folderName: "TencentMeeting",
+                                         plistDisplayName: "TencentMeeting",
+                                         plistName: "腾讯会议") == ["腾讯会议", "tencentmeeting"],
+              "\(AppUninstaller.nameNeedles(name: "腾讯会议", folderName: "TencentMeeting", plistDisplayName: "TencentMeeting", plistName: "腾讯会议"))")
+        check("55-D: short spellings are not needles",
+              AppUninstaller.nameNeedles(name: "ab", folderName: nil,
+                                         plistDisplayName: nil, plistName: nil).isEmpty)
+        check("55-B: no localised name anywhere yields nil",
+              AppNaming.localizedDisplayName(
+                  localizations: ["en"],
+                  preferences: ["en"],
+                  loadTable: { (_: String) -> [String: String]? in nil }
+              ) == nil)
+
+            section("Review 41 — New Folder")
+
+        // ① The decision, as a pure function. One member is a folder only when
+        // the user asked for it; zero members is never a folder.
+        check("a single member is a folder when the user made it",
+              !AppFolder.dissolves(memberCount: 1, isExplicit: true))
+        check("a single member is still not a folder when nobody did",
+              AppFolder.dissolves(memberCount: 1, isExplicit: false))
+        check("nothing survives at zero members, whoever made it",
+              AppFolder.dissolves(memberCount: 0, isExplicit: true))
+
+        // ② The effect, through the real store: the API produces that folder and
+        // leaves no second icon behind (I2).
+        let nfURL = tempFile("newfolder")
+        let nfStore = DeckStore(storeURL: nfURL)
+        nfStore.metrics = GridMetrics(columns: 7, rows: 5, iconSize: 100, cellWidth: 150, cellHeight: 150)
+        let nfIDs = Array(nfStore.visibleApps.prefix(2)).map(\.id)
+        check("New Folder fixture: two loose apps to work with",
+              nfIDs.count == 2, "\(nfIDs.count)")
+
+        let nfFolderID = nfIDs.first.flatMap { nfStore.makeFolder(holding: $0) }
+        check("New Folder produces a folder holding just that app",
+              nfFolderID.flatMap { nfStore.folder($0)?.appIDs } == nfIDs.first.map { [$0] },
+              nfFolderID.flatMap { nfStore.folder($0)?.appIDs }.map { "\($0)" } ?? "no folder")
+        check("... and the app is no longer a grid slot of its own",
+              nfIDs.first.map { id in !nfStore.pages.contains { $0.contains(.app(id)) } } == true)
+        check("... and the slot it left behind is the folder",
+              nfFolderID.map { fid in nfStore.pages.contains { $0.contains(.folder(fid)) } } == true)
+
+        // Persisted, not merely in memory: without the mark on disk the next
+        // launch reads a plain one-member folder and dissolves it. Read back
+        // through `JSONSerialization` rather than matching bytes, so the check
+        // says what it means and does not pin the encoder's formatting
+        // (`.prettyPrinted` puts spaces around the colon).
+        let nfDisk = (try? Data(contentsOf: nfURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let nfDiskFolders = nfDisk?["folders"] as? [[String: Any]]
+        check("... and the mark is on disk, not only in memory",
+              nfDiskFolders?.contains { ($0["isUserCreated"] as? Bool) == true } == true,
+              nfDiskFolders.map { "\($0.count) folder(s) on disk" } ?? "no file")
+
+        // ③ The rule that would otherwise eat it: a rescan runs `reconcile`,
+        // whose folder loop used to read "fewer than two members ⇒ dissolve".
+        let nfFoldersBefore = nfStore.folders.count
+        nfStore.applyScan(nfStore.apps)
+        check("... and the rescan was adopted, so `reconcile` really ran",
+              !(nfStore.lastError ?? "").contains("failed scan"),
+              nfStore.lastError ?? "nothing reported")
+        check("a rescan does not dissolve the folder the user made",
+              nfStore.folders.count == nfFoldersBefore,
+              "\(nfFoldersBefore) -> \(nfStore.folders.count)")
+        check("... and it is not announced as repaired data either",
+              !(nfStore.lastError ?? "").contains("fell below two members"),
+              nfStore.lastError ?? "nothing reported")
+
+        // ④ An app already inside a folder has no slot that could become one.
+        check("New Folder refuses an app that is already a folder member",
+              nfIDs.first.map { nfStore.makeFolder(holding: $0) == nil } == true)
+
+        // ⑤ The only member leaves: now it *is* empty, and an empty folder goes.
+        if let fid = nfFolderID, let only = nfIDs.first {
+            nfStore.removeFromFolder(only, folder: fid)
+        }
+        check("dragging its only member out dissolves it",
+              nfFolderID.map { nfStore.folder($0) == nil } == true)
+        check("... and the app lands back on the grid",
+              nfIDs.first.map { id in nfStore.pages.contains { $0.contains(.app(id)) } } == true)
+
+        // ⑥ Once it has a second member and loses it, it stays at one. That is
+        // the choice, not an accident: the user asked for this folder, and
+        // `detachFromAnyFolder`'s own comment says a named folder vanishing
+        // silently is exactly what the class contract promises to surface.
+        if let fid = nfIDs.first.flatMap({ nfStore.makeFolder(holding: $0) }) {
+            if nfIDs.count == 2 { nfStore.addToFolder(nfIDs[1], folder: fid) }
+            check("with a second member it is an ordinary two-member folder",
+                  nfStore.folder(fid)?.appIDs.count == 2,
+                  "\(nfStore.folder(fid)?.appIDs.count ?? -1)")
+            if nfIDs.count == 2 { nfStore.removeFromFolder(nfIDs[1], folder: fid) }
+            check("losing that member leaves it at one rather than dissolving",
+                  nfStore.folder(fid)?.appIDs == nfIDs.first.map { [$0] },
+                  nfStore.folder(fid).map { "\($0.appIDs)" } ?? "dissolved")
+        }
+        sweep(nfURL, ".empty-pages-")
+
+        // ⑦ A layout written before the flag existed must still load. A
+        // *synthesised* decoder throws on the missing key, which the loader reads
+        // as corruption — so this is the assertion that keeps an old file out of
+        // the recovery path (A1), not a nicety.
+        let legacyJSON = "{\"id\":\"\(UUID().uuidString)\",\"name\":\"Legacy\",\"appIDs\":[\"legacy-a\",\"legacy-b\"]}"
+        let legacyFolder = try? JSONDecoder().decode(AppFolder.self, from: Data(legacyJSON.utf8))
+        check("a folder written before the flag existed still decodes", legacyFolder != nil)
+        check("... and reads as a plain folder — exactly the old behaviour",
+              legacyFolder?.isUserCreated == false)
+        let marked = AppFolder(name: "Kept", appIDs: ["kept-a"], isUserCreated: true)
+        let roundTripped = (try? JSONEncoder().encode(marked))
+            .flatMap { try? JSONDecoder().decode(AppFolder.self, from: $0) }
+        check("the flag survives an encode/decode round trip",
+              roundTripped?.isUserCreated == true)
+
+        // ⑧ The launch path, not just the rescan path: a one-member folder the
+        // user made, already on disk, must come back as itself. Uses a real id so
+        // the member survives the scan rather than relying on the one-observation
+        // grace.
+        if let keptApp = nfIDs.first {
+            let keptURL = tempFile("keptfolder")
+            let keptID = UUID().uuidString
+            let keptJSON = "{\"pages\": [[\"folder:\(keptID)\"]], "
+                + "\"folders\": [{\"id\":\"\(keptID)\",\"name\":\"Kept\","
+                + "\"appIDs\":[\"\(keptApp)\"],\"isUserCreated\":true}], "
+                + "\"hidden\": [], \"sortKey\": \"manual\", \"sortOrder\": \"ascending\", "
+                + "\"customOrder\": [\"\(keptApp)\"]}"
+            try? Data(keptJSON.utf8).write(to: keptURL)
+            let keepStore = DeckStore(storeURL: keptURL)
+            check("a one-member folder the user made is still there after a launch",
+                  keepStore.folders.count == 1, "\(keepStore.folders.count) folder(s)")
+            check("... and it is still marked as the user's",
+                  keepStore.folders.values.first?.isUserCreated == true)
+            sweep(keptURL, ".empty-pages-")
+        }
+
+        // ⑥b The third site that asks the rule: `detachFromAnyFolder`, reached
+        // when a folder **loses a member to another folder**. A user folder that
+        // shrinks from two members to one keeps its remaining app. Without this
+        // the site could be reverted to `count <= 1` with the suite still green.
+        let dnURL = tempFile("detach")
+        let dnStore = DeckStore(storeURL: dnURL)
+        dnStore.metrics = GridMetrics(columns: 7, rows: 5, iconSize: 100, cellWidth: 150, cellHeight: 150)
+        let dnIDs = Array(dnStore.visibleApps.prefix(3)).map(\.id)
+        if dnIDs.count == 3 {
+            // `thief` must be holding an app of its own before the theft. The
+            // first version of this fixture made `thief` the source of the app
+            // that joined `host`, which *correctly* left `thief` at zero members
+            // and dissolved it — so the steal had nowhere to go and the check
+            // failed looking like a rule bug. Fixture bug; the rule was right.
+            let host = dnStore.makeFolder(holding: dnIDs[0])
+            let thief = dnStore.makeFolder(holding: dnIDs[2])
+            if let h = host { dnStore.addToFolder(dnIDs[1], folder: h) }
+            check("the host folder really holds both apps before one is taken",
+                  host.flatMap { dnStore.folder($0)?.appIDs.count } == 2,
+                  host.flatMap { dnStore.folder($0)?.appIDs.count }.map { "\($0)" } ?? "no folder")
+            if let t = thief { dnStore.addToFolder(dnIDs[0], folder: t) }
+            check("a user folder that loses a member to another folder is not dissolved",
+                  host.flatMap { dnStore.folder($0)?.appIDs } == [dnIDs[1]],
+                  host.flatMap { dnStore.folder($0) }.map { "\($0.appIDs)" } ?? "dissolved")
+        }
+        sweep(dnURL, ".empty-pages-")
+
+        // ⑨ The fourth site: `normalizeFolderExclusivity` (I1). It only reaches
+        // the decision when it actually *strips* a member, so the breach has to be
+        // injected — one app in two folders, with the user's folder second in page
+        // order so it is the one that loses it. A layout file is user-editable and
+        // is read straight off disk, so an I1 breach is a real input, not a
+        // synthetic one. `plain` keeps both members, which is what proves the
+        // strip really happened rather than the pass never running.
+        let nxURL = tempFile("exclusive")
+        let nxStore = DeckStore(storeURL: nxURL)
+        let nxIDs = Array(nxStore.visibleApps.prefix(3)).map(\.id)
+        if nxIDs.count == 3 {
+            let plainID = UUID()
+            let userID = UUID()
+            nxStore.folders[plainID] = AppFolder(id: plainID, name: "Plain",
+                                                 appIDs: [nxIDs[0], nxIDs[2]])
+            nxStore.folders[userID] = AppFolder(id: userID, name: "Mine",
+                                                appIDs: [nxIDs[0], nxIDs[1]],
+                                                isUserCreated: true)
+            nxStore.pages[0] = [.folder(plainID), .folder(userID)] + nxStore.pages[0]
+            nxStore.applyScan(nxStore.apps)
+            check("... and the exclusivity rescan was adopted too",
+                  !(nxStore.lastError ?? "").contains("failed scan"),
+                  nxStore.lastError ?? "nothing reported")
+            check("a user folder stripped to one member by the I1 pass survives",
+                  nxStore.folder(userID)?.appIDs == [nxIDs[1]],
+                  nxStore.folder(userID).map { "\($0.appIDs)" } ?? "dissolved")
+            check("... while the plain folder that kept both members is untouched",
+                  nxStore.folder(plainID)?.appIDs.count == 2,
+                  nxStore.folder(plainID).map { "\($0.appIDs)" } ?? "dissolved")
+        }
+        sweep(nxURL, ".empty-pages-")
 
         // ------------------------------------------------------------------
         // Rename handover — the identity this app carried before it was

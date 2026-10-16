@@ -36,7 +36,11 @@ enum BenchRunner {
         let store = DeckStore(readOnly: true)
         store.reloadApps()
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { exit(1) }
-        let metrics = GridMetrics.make(for: screen, preset: DeckSettings.shared.gridPreset)
+        let metrics = GridMetrics.make(
+            for: screen,
+            preset: DeckSettings.shared.gridPreset,
+            iconScale: CGFloat(DeckSettings.shared.iconScale)
+        )
         store.metrics = metrics
 
         let pageCount = max(store.pages.count, 1)
@@ -51,7 +55,11 @@ enum BenchRunner {
         )
         window.setFrameOrigin(NSPoint(x: -20000, y: -20000))
 
-        let root = LaunchpadView(store: store, vm: vm, metrics: metrics, screen: screen)
+        // The drag models are inert here — `DragOffsetModel` never starts its
+        // display link while headless — but the view still needs them: it draws
+        // the strip and the lifted-tile badge from exactly these objects.
+        let root = LaunchpadView(store: store, vm: vm, metrics: metrics, screen: screen,
+                                 drag: DragState(), offset: DragOffsetModel())
         let hosting = NSHostingView(rootView: root)
         hosting.frame = CGRect(origin: .zero, size: screen.frame.size)
         window.contentView = hosting
@@ -89,7 +97,8 @@ enum BenchRunner {
         /// A probe deck in its own window, so a programmatic scroll has something
         /// to scroll.
         func probeWindow(_ vm: LaunchpadViewModel) -> NSWindow {
-            let root = LaunchpadView(store: store, vm: vm, metrics: metrics, screen: screen)
+            let root = LaunchpadView(store: store, vm: vm, metrics: metrics, screen: screen,
+                                     drag: DragState(), offset: DragOffsetModel())
             let host = NSHostingView(rootView: root)
             let window = NSWindow(
                 contentRect: CGRect(x: 0, y: 0, width: 700, height: 460),

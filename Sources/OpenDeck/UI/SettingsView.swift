@@ -200,6 +200,27 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            HStack {
+                Slider(
+                    value: $settings.iconScale,
+                    in: Double(IconScale.minimum)...Double(IconScale.maximum),
+                    step: 0.05
+                ) {
+                    Text("Icon Size")
+                } minimumValueLabel: {
+                    Image(systemName: "minus")
+                } maximumValueLabel: {
+                    Image(systemName: "plus")
+                }
+                Text("\(Int((settings.iconScale * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+            Text("Scales app icons against the size the display already gives them. Clamped, so an icon can never grow out of its cell.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Picker("Sort By", selection: $store.sortKey) {
                 ForEach(SortKey.allCases) { key in
                     Text(key.label).tag(key)
@@ -257,7 +278,14 @@ struct SettingsView: View {
                 Text("Drag icons to reorder. Dropping one app onto another creates a folder.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else {
+                Text("Dragging to reorder is only available in Custom sort mode.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
+            Text("Filling gaps moves apps forward to fill empty slots using the current row and column layout, so pages can merge.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if let message = vm.statusMessage {
                 Text(message).font(.caption).foregroundStyle(.secondary)
             }
@@ -430,6 +458,18 @@ struct SettingsView: View {
                 }
             }
 
+            Picker("Open on", selection: $settings.screenPolicy) {
+                ForEach(ScreenPolicy.allCases) { policy in
+                    Text(policy.label).tag(policy)
+                }
+            }
+            .pickerStyle(.menu)
+            Text(NSScreen.screens.count > 1
+                 ? "The deck opens on the screen this policy names, every time it is summoned."
+                 : "This Mac has one display, so every option here looks the same; they differ once a second screen is attached.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Toggle("Hide the Dock while the deck is open", isOn: $settings.hideDock)
 
             Toggle("Show a menu bar icon", isOn: $settings.showMenuBarIcon)
@@ -437,6 +477,16 @@ struct SettingsView: View {
                     NotificationCenter.default.post(name: .deckMenuBarIconChanged, object: nil)
                 }
             Text("Adds a small grid icon to the menu bar with Open, Settings and Quit — handy for a windowless overlay. Off by default, since the app already has a Dock icon.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("Show a Dock icon", isOn: $settings.showDockIcon)
+            Text("Turning this off removes the app from the Dock. With no Dock icon and no menu bar icon there is no way to quit from the UI, so keep at least one on.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("Hold Option for Uninstall", isOn: $settings.holdOptionForUninstall)
+            Text("LaunchOS's uninstall mode: hold Option and click an app to go straight to the uninstall confirmation instead of launching it. Off by default — it changes what a click does.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

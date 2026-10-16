@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: LaunchpadWindowController!
     private var settingsController: SettingsWindowController!
     private var uninstallController: UninstallWindowController!
+    private var reorganizeController: ReorganizeWindowController!
 
     /// Minimum gap between rescans triggered merely by showing the deck.
     private static let openRescanInterval: TimeInterval = 5
@@ -17,7 +18,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastScanAt: Date = Date()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        // Repair the impossible pair before anything reads either setting.
+        // Done here rather than in the toggle, because a check in the settings UI
+        // can only see values written after it existed — an install that already
+        // holds both icons off would keep its trap forever.
+        let icons = DockIconPolicy.resolveIcons(
+            showDockIcon: DeckSettings.shared.showDockIcon,
+            showMenuBarIcon: DeckSettings.shared.showMenuBarIcon
+        )
+        if icons.menuBar != DeckSettings.shared.showMenuBarIcon {
+            DeckSettings.shared.showMenuBarIcon = true
+        }
+        NSApp.setActivationPolicy(DockIconPolicy.policy(showDockIcon: icons.dock))
         buildMainMenu()
 
         // The app was called LaunchDeck before the rename, which moved both the
@@ -41,7 +53,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         vm = LaunchpadViewModel(store: store)
         windowController = LaunchpadWindowController(store: store, vm: vm)
         settingsController = SettingsWindowController(store: store, settings: DeckSettings.shared)
+        // Report 47: settings sits **over** the deck instead of replacing it, so
+        // closing it hands the keyboard back rather than leaving a live but deaf
+        // deck on screen.
+        settingsController.onClose = { [weak self] in
+            self?.windowController.refocus()
+        }
         uninstallController = UninstallWindowController(store: store)
+        // Report 51: the uninstall panel is raised above the deck instead of
+        // replacing it, so closing it hands the keyboard back — the same
+        // contract as settings above.
+        uninstallController.onClose = { [weak self] in
+            self?.windowController.refocus()
+        }
+        reorganizeController = ReorganizeWindowController()
+        // Same contract as the two panels above (reports 47/51): the sheet
+        // never takes the deck down, and the deck gets the keyboard back.
+        reorganizeController.onClose = { [weak self] in
+            self?.windowController.refocus()
+        }
 
         observeNotifications()
 
@@ -156,6 +186,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         center.addObserver(
             self,
+            selector: #selector(reorganizeRequested),
+            name: .deckRequestReorganize,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(displayModeChanged),
+            name: .deckDisplayModeChanged,
+            object: nil
+        )
+        center.addObserver(
+            self,
             selector: #selector(hotKeyChanged(_:)),
             name: .deckHotKeyChanged,
             object: nil
@@ -223,8 +265,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func uninstallRequested(_ note: Notification) {
         guard let appID = note.object as? String, let app = store.app(id: appID) else { return }
-        windowController.hide()
+        // **Asking to uninstall something is not a reason to take the deck down**
+        // (report 51). This used to `windowController.hide()` — with the default
+        // `deactivate: true` — and then show the panel. That is precisely the
+        // trap `hide(deactivate:)` documents: `NSApp.hide(nil)` fires 0.13 s
+        // later, when the fade ends, and takes the panel down with the rest of
+        // the app, so the user saw the confirmation window flash and vanish. The
+        // panel is raised above the deck instead (`UninstallPanelLevel`) and
+        // closing it hands the keyboard back.
         uninstallController.show(app: app)
+    }
+
+    /// Opens the Reorganize Layout sheet (report 53, LaunchOS Pro feature).
+    ///
+    /// The sheet reopens on the rules the user last used (`DeckSettings`
+    /// persists the `Organize*` keys, as LaunchOS does). The deck stays up
+    /// behind it — the same contract as the settings and uninstall panels.
+    @objc private func reorganizeRequested() {
+        reorganizeController.show(
+            options: DeckSettings.shared.organizeOptions,
+            pageCount: store.pages.count,
+            above: ReorganizePanelLevel.panel,
+            onApply: { [weak self] options in
+                DeckSettings.shared.organizeOptions = options
+                self?.confirmReorganize(options)
+            }
+        )
+    }
+
+    /// The display mode changed (report 56 §5). The window is built per showing,
+    /// so the honest thing is to rebuild it now: the user picked a mode and
+    /// expects to see it, not to be told to reopen the deck.
+    @objc private func displayModeChanged() {
+        guard windowController.isVisible else { return }
+        let screen = LaunchpadWindowController.targetScreen()
+        windowController.show(on: screen)
+    }
+
+    /// The overwrite confirmation, with LaunchOS's own wording
+    /// (`localization.json`): "The current app layout and folders will be
+    /// overwritten.\nThis action cannot be undone.\nDo you want to continue?"
+    private func confirmReorganize(_ options: OrganizeOptions) {
+        guard !AppEnvironment.isHeadless else { return }
+        let alert = NSAlert()
+        alert.messageText = "The current app layout and folders will be overwritten.\n"
+            + "This action cannot be undone.\n"
+            + "Do you want to continue?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Reorganize")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        store.reorganize(with: options)
+        windowController.refocus()
     }
 
     @objc private func hotKeyChanged(_ note: Notification) {
@@ -270,11 +362,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openSettings() {
-        // Show settings only after the deck has faded out, and do not deactivate
-        // the app: `NSApp.hide` would take the settings window down with it.
-        windowController.hide(deactivate: false) { [weak self] in
-            self?.settingsController.show()
-        }
+        // **Opening settings is not leaving the app** (report 47).
+        //
+        // This used to `windowController.hide(deactivate: false)` first and only
+        // then show settings. That took the whole deck down — the desktop came
+        // back, and since `hide()` also tears the host down and resets the view
+        // model, closing settings left the user looking at their wallpaper with
+        // nothing to return to. LaunchOS does not do that: `openPreferences`
+        // (`0x10011f650`) only dispatches its preferences window through
+        // `MenuBarManager`; nothing hides the launchpad.
+        //
+        // So the deck stays up and the panel is raised above it. `deactivate`
+        // never mattered here — the previous comment worried about `NSApp.hide`
+        // taking the settings window down with it, which is exactly why the
+        // window is given a level instead.
+        settingsController.show(
+            above: SettingsPanelLevel.resolve(
+                deckVisible: windowController.isVisible,
+                deckLevel: LaunchpadWindowController.deckWindowLevel
+            )
+        )
     }
 
     /// A minimal menu bar so standard shortcuts (Cmd+Q, Cmd+,) work.

@@ -65,6 +65,46 @@ enum AppUninstaller {
         ]
     }
 
+    /// Every spelling a leftover directory might use.
+    ///
+    /// The caption is now the **localised** name (report 55: 腾讯会议 where the
+    /// bundle folder and the base plist say `TencentMeeting`), but vendors name
+    /// their support folders after the *bundle* name — matching only the caption
+    /// would silently stop finding `~/Library/Application Support/TencentMeeting`
+    /// the day the caption became Chinese. All four spellings are matched.
+    ///
+    /// Pure, so the rule is checkable without a file system.
+    static func nameNeedles(name: String,
+                            folderName: String?,
+                            plistDisplayName: String?,
+                            plistName: String?) -> [String] {
+        var needles: [String] = []
+        func add(_ value: String?) {
+            guard let value, value.count > 3 else { return }
+            let lower = value.lowercased()
+            if !needles.contains(lower) { needles.append(lower) }
+        }
+        add(name)
+        add(folderName)
+        add(plistDisplayName)
+        add(plistName)
+        return needles
+    }
+
+    /// The needles for one app: the caption plus the bundle's own spellings,
+    /// read off the bundle at uninstall time (one-off, user-initiated).
+    static func nameNeedles(for app: AppInfo) -> [String] {
+        let folder = (app.path as NSString).lastPathComponent
+        let folderName = folder.hasSuffix(".app") ? String(folder.dropLast(4)) : folder
+        let info = Bundle(path: app.path)?.infoDictionary
+        return nameNeedles(
+            name: app.name,
+            folderName: folderName,
+            plistDisplayName: info?["CFBundleDisplayName"] as? String,
+            plistName: info?["CFBundleName"] as? String
+        )
+    }
+
     /// Collect files whose name matches the app's bundle identifier or name,
     /// tagged with **why** each one matched.
     ///
@@ -77,8 +117,9 @@ enum AppUninstaller {
         let fm = FileManager.default
         var identifiers: [String] = []
         if let bid = app.bundleID?.lowercased(), bid.count > 3 { identifiers.append(bid) }
-        // Also match the display name, which is how many vendors name their folders.
-        let nameNeedle = app.name.count > 3 ? app.name.lowercased() : nil
+        // Also match the display name, which is how many vendors name their
+        // folders — plus every other spelling of it (report 55).
+        let nameNeedles = Self.nameNeedles(for: app)
 
         var results: [UninstallCandidate] = []
         for root in searchRoots {
@@ -90,7 +131,7 @@ enum AppUninstaller {
                 let kind: UninstallMatch
                 if identifiers.contains(where: { lower.contains($0) }) {
                     kind = .identifier
-                } else if let nameNeedle, lower.contains(nameNeedle) {
+                } else if nameNeedles.contains(where: { lower.contains($0) }) {
                     kind = .nameOnly
                 } else {
                     continue

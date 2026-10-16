@@ -17,10 +17,26 @@ final class LaunchpadViewModel: ObservableObject {
     /// animates itself and then calls back, because relying on SwiftUI's removal
     /// transition did not animate reliably.
     @Published var folderClosing = false
+    /// Report 46 — set when a drag **pulls a member out** of the open panel:
+    /// the panel plays the same collapse, but the teardown afterwards is a
+    /// light one. A full `closeFolder()` would call `store.endDragSession()`
+    /// while the drag is still live, reclaiming the deferred empty pages under
+    /// a drag that is still flying — so the pull-out path clears only the
+    /// overlay's own state and leaves the session to the commit.
+    @Published var folderMinimizing = false
     @Published var folderNameDraft = ""
     /// Where the folder tile was on screen when it was opened, so the expanded
     /// panel can grow out of it (the animation proxy's start frame).
     @Published var folderOrigin: CGRect?
+
+    /// Geometry of the expanded folder panel's grid, in deck coordinates.
+    ///
+    /// Deliberately **not** published: it changes on layout, and republishing it
+    /// would re-evaluate the deck. Written by `FolderOverlayView` as it lays out,
+    /// read by `DeckDragHost`'s hit test — the host has to be able to tell which
+    /// tile inside the panel was pressed, and only the view knows where the panel
+    /// is.
+    var folderPanel: FolderPanelLayout?
 
     let store: DeckStore
     let paging = PagingModel()
@@ -48,27 +64,23 @@ final class LaunchpadViewModel: ObservableObject {
 
     /// Ranked search over name and bundle identifier.
     var searchResults: [AppInfo] {
-        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !needle.isEmpty else { return [] }
+        let raw = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !raw.isEmpty else { return [] }
+        // Spaces are dropped on both sides of the latin comparison, so a user who
+        // types "wei xin" and one who types "weixin" get the same result against
+        // the space-separated transliteration.
+        let needle = raw.replacingOccurrences(of: " ", with: "")
 
         let pool = DeckSettings.shared.showHiddenInSearch ? store.apps : store.visibleApps
         return pool
             .compactMap { app -> (AppInfo, Int)? in
-                let name = app.name.lowercased()
-                let score: Int
-                if name == needle {
-                    score = 0
-                } else if name.hasPrefix(needle) {
-                    score = 1
-                } else if name.contains(needle) {
-                    score = 2
-                } else if let bid = app.bundleID?.lowercased(), bid.contains(needle) {
-                    score = 3
-                } else if Self.isSubsequence(needle, of: name) {
-                    score = 4
-                } else {
-                    return nil
-                }
+                guard let score = Self.matchScore(
+                    name: app.name,
+                    latin: cachedLatinKey(for: app.name),
+                    bundleID: app.bundleID,
+                    raw: raw,
+                    needle: needle
+                ) else { return nil }
                 return (app, score)
             }
             .sorted { a, b in
@@ -76,6 +88,75 @@ final class LaunchpadViewModel: ObservableObject {
                 return a.0.name.localizedStandardCompare(b.0.name) == .orderedAscending
             }
             .map(\.0)
+    }
+
+    /// The rank of an app against the query, or nil when nothing matches.
+    ///
+    /// Pulled out as a **pure function** so the ranking can be asserted directly
+    /// instead of through a store and a live search. `raw` is the trimmed,
+    /// lowercased query and `needle` is the same with spaces removed; `latin` is
+    /// the name's transliteration in the same no-space form (see `latinized`).
+    static func matchScore(
+        name: String,
+        latin: String?,
+        bundleID: String?,
+        raw: String,
+        needle: String
+    ) -> Int? {
+        let name = name.lowercased()
+        if name == raw || latin == needle { return 0 }
+        if name.hasPrefix(raw) || latin?.hasPrefix(needle) == true { return 1 }
+        if name.contains(raw) || latin?.contains(needle) == true { return 2 }
+        if let bid = bundleID?.lowercased(), bid.contains(raw) { return 3 }
+        if isSubsequence(needle, of: name) { return 4 }
+        if let latin, isSubsequence(needle, of: latin) { return 4 }
+        return nil
+    }
+
+    /// Lowercased transliteration of `name` with spaces removed, or nil.
+    ///
+    /// **Static and pure on purpose.** An earlier draft made this the caching
+    /// instance method itself, and the space-stripping it performs was then
+    /// unreachable from the self-test: every assertion built its own `latin:`
+    /// argument and called `matchScore` directly, so deleting the strip left the
+    /// suite green (report 42, mutation M107). The cache below is now a separate
+    /// wrapper, and this seam is the one the assertions drive.
+    static func latinKey(for name: String) -> String? {
+        let value = latinized(name)?.replacingOccurrences(of: " ", with: "") ?? ""
+        return value.isEmpty ? nil : value
+    }
+
+    /// Cache of `latinKey` results, keyed by the original name.
+    ///
+    /// `CFStringTransform` walks the whole string through ICU, so calling it for
+    /// every app on every keystroke would show up on a large grid. A name does
+    /// not change during a session, so the answer is computed once per name. An
+    /// empty string means "no transliteration", which is different from "not
+    /// looked up yet".
+    private var latinCache: [String: String] = [:]
+
+    private func cachedLatinKey(for name: String) -> String? {
+        let value: String
+        if let hit = latinCache[name] {
+            value = hit
+        } else {
+            value = Self.latinKey(for: name) ?? ""
+            latinCache[name] = value
+        }
+        return value.isEmpty ? nil : value
+    }
+
+    /// Latin transliteration of `name`, lowercased — "微信" becomes "wei xin".
+    ///
+    /// Uses the system's ICU-backed transform, so the app ships **no** dictionary
+    /// and gains **no** dependency. Returns nil when the transform is unavailable,
+    /// in which case the caller simply has one fewer way to match rather than the
+    /// search failing.
+    static func latinized(_ name: String) -> String? {
+        let mutable = NSMutableString(string: name) as CFMutableString
+        guard CFStringTransform(mutable, nil, kCFStringTransformToLatin, false) else { return nil }
+        guard CFStringTransform(mutable, nil, kCFStringTransformStripDiacritics, false) else { return nil }
+        return (mutable as String).lowercased()
     }
 
     /// Character-subsequence match, so "gimp" can find "GraphicImageProcessor".
@@ -161,6 +242,7 @@ final class LaunchpadViewModel: ObservableObject {
         selection = -1
         isEditingFolderName = false
         folderClosing = false
+        folderMinimizing = false
         store.save()
     }
 
@@ -169,7 +251,10 @@ final class LaunchpadViewModel: ObservableObject {
         selection = -1
         openedFolder = nil
         folderOrigin = nil
+        folderPanel = nil
         isEditingFolderName = false
+        folderClosing = false
+        folderMinimizing = false
         // Redundant safety net: `show()`/`hide()` both call `reset()`, so a
         // session left open by a missed `onEnded` is closed here too.
         store.endDragSession()
@@ -235,10 +320,10 @@ final class LaunchpadViewModel: ObservableObject {
         if let folderID = openedFolder {
             let count = store.folderApps(folderID).count
             guard count > 0 else { return }
-            // A folder panel is not always four columns wide — the column count
-            // depends on the member count (see `FolderLayout`). Using a hard-coded
-            // 4 here made ↑/↓ skip or mis-align rows for 2–9 member folders.
-            let cols = FolderLayout.columns(forMemberCount: count)
+            // A folder panel uses the page's column count (LaunchOS
+            // `columnsPerPage`, see `FolderLayout`), so ↑/↓ must move by that
+            // stride to stay aligned with the drawn grid.
+            let cols = FolderLayout.columns(pageColumns: store.metrics.columns)
             let next = selection + dx + dy * cols
             if next >= 0, next < count { selection = next }
             return

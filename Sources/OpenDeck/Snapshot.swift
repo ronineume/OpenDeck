@@ -23,7 +23,11 @@ enum SnapshotRunner {
         store.reloadApps()
 
         let screen = NSScreen.main ?? NSScreen.screens[0]
-        let metrics = GridMetrics.make(for: screen, preset: DeckSettings.shared.gridPreset)
+        let metrics = GridMetrics.make(
+            for: screen,
+            preset: DeckSettings.shared.gridPreset,
+            iconScale: CGFloat(DeckSettings.shared.iconScale)
+        )
         store.metrics = metrics
 
         let wantsSettings = CommandLine.arguments.contains("--settings")
@@ -45,7 +49,10 @@ enum SnapshotRunner {
                queryIndex + 1 < CommandLine.arguments.count {
                 vm.query = CommandLine.arguments[queryIndex + 1]
             }
-            let root = LaunchpadView(store: store, vm: vm, metrics: metrics, screen: screen)
+            // Inert drag models: headless, so the strip's display link never
+            // starts, but the view still draws the strip and the lifted tile.
+            let root = LaunchpadView(store: store, vm: vm, metrics: metrics, screen: screen,
+                                     drag: DragState(), offset: DragOffsetModel())
             let view = NSHostingView(rootView: root)
             view.frame = CGRect(origin: .zero, size: screen.frame.size)
             hosting = view

@@ -91,6 +91,15 @@ struct FileSeams {
 ///   matter the order of the slots in `pages`. The tie-breaker that makes this
 ///   hold is **"folder membership always wins over a standalone slot"**.
 ///
+/// - **I5 — a folder holds at least two apps.** One member is not a folder, it
+///   is an app. The single exception is a folder the **user** created on purpose
+///   (`AppFolder.isUserCreated`), which may sit at one member while it waits for a
+///   second; zero members is never a folder, whoever made it. The rule lives in
+///   **one** function, `AppFolder.dissolves(memberCount:isExplicit:)`, and the
+///   paths that can shrink a folder (`removeFromFolder`, `detachFromAnyFolder`,
+///   `reconcile`, `normalizeFolderExclusivity`) all ask it rather than comparing
+///   counts — report 39's X90 lesson: make the duplicate point disappear.
+///
 /// `makeFolder` / `addToFolder` enforce I1–I3 at the point of mutation;
 /// `reconcile` is the authoritative normaliser that restores all four for data
 /// already on disk. Any automatic repair leaves a trace (see `recordDataRepair`).
@@ -115,6 +124,38 @@ final class DeckStore: ObservableObject {
     /// mixing "your file is damaged, this session will not save" with those in
     /// one banner would flatten two very different severities.
     @Published private(set) var layoutHealthMessage: String?
+    /// The most recent merge-motion request (report 44 §3). Set by every path
+    /// that folds an app into a folder (absorbed) or dissolves one (released);
+    /// the folder cell consumes it to play the decoded LaunchOS motion. The
+    /// animation itself cannot be asserted headlessly — the *signal* is what
+    /// the suite pins, one assertion per site below (M120–M124).
+    @Published private(set) var mergeFlash: MergeFlash?
+    private var mergeFlashToken = 0
+
+    private func flashMerge(_ kind: MergeFlash.Kind, folder: UUID) {
+        mergeFlashToken += 1
+        mergeFlash = MergeFlash(folderID: folder, kind: kind, token: mergeFlashToken)
+    }
+
+    /// The folder the pointer is over during a drag — the drop-hover signal.
+    /// `DragState` computes it (`combineFolderID`) but the grid must not observe
+    /// `DragState`, so the drag host mirrors the value here and `FolderCell`
+    /// consumes it to play the decoded drop-hover zoom (1.05).
+    @Published private(set) var dropHoverFolderID: UUID?
+
+    /// One write per change. The caller diffs, so a pointer move that does not
+    /// cross a folder boundary costs no re-render.
+    func setDropHoverFolder(_ id: UUID?) { dropHoverFolderID = id }
+
+    /// The drop-hover mirror for a merge over an **app** tile — the same
+    /// signal `dropHoverFolderID` is for folders, naming the app the dragged
+    /// icon would fold with into a new folder. `AppCell` plays the decoded
+    /// zoom (1.05) and the merge ring on it.
+    @Published private(set) var dropHoverAppID: String?
+
+    /// One write per change. The caller diffs, so a pointer move that does not
+    /// cross a tile boundary costs no re-render.
+    func setDropHoverApp(_ id: String?) { dropHoverAppID = id }
     /// Grid geometry for the screen currently being displayed; set by the window controller.
     @Published var metrics = GridMetrics(columns: 7, rows: 5, iconSize: 104, cellWidth: 150, cellHeight: 166) {
         didSet {
@@ -401,14 +442,57 @@ final class DeckStore: ObservableObject {
             if !updated.appIDs.contains(source) { updated.appIDs.append(source) }
             folders[fid] = updated
             removeGridSlot(source)
+            syncCustomOrder()
             save()
+            flashMerge(.absorbed, folder: fid)
             return
         }
         let folder = AppFolder(name: "Folder", appIDs: [target, source])
         folders[folder.id] = folder
         replaceInGrid(.app(target), with: .folder(folder.id))
         removeGridSlot(source)
+        syncCustomOrder()
         save()
+        flashMerge(.absorbed, folder: folder.id)
+    }
+
+    /// Create a folder holding exactly `appID`, from the **user's** explicit
+    /// request ("New Folder" on an app's menu).
+    ///
+    /// ⚠️ The only folder in the model that is born with fewer than two members,
+    /// and the only reason `AppFolder.isUserCreated` exists. Without that mark the
+    /// folder the user just asked for would be dissolved by the very next
+    /// mutation — or by `reconcile`, which would additionally announce it as
+    /// repaired data (`recordDataRepair`'s "fell below two members" message).
+    ///
+    /// Returns the new folder's id, or `nil` when there is nothing to do: no such
+    /// app, or it is not a standalone grid slot (already a folder's member — I2 —
+    /// or not placed at all). Re-checked here rather than trusted from the menu.
+    @discardableResult
+    func makeFolder(holding appID: String) -> UUID? {
+        guard apps.contains(where: { $0.id == appID }), isGridSlot(appID) else { return nil }
+        let folder = AppFolder(name: "Folder", appIDs: [appID], isUserCreated: true)
+        folders[folder.id] = folder
+        replaceInGrid(.app(appID), with: .folder(folder.id))
+        // A no-op *here*, and kept on purpose. Folding an app that `isGridSlot`
+        // just vouched for leaves `customOrder` unchanged — the app is already in
+        // the list, and the folder expands back to the same ids in the same
+        // order. Probed, not assumed: deleting this line leaves the suite green
+        // at 499/499 (report 41 §5.3). It stays because re-deriving
+        // `customOrder` is what *every* mutation site does, and this is one; a
+        // reader should not have to work out why this one is different.
+        syncCustomOrder()
+        save()
+        return folder.id
+    }
+
+    /// Whether `appID` occupies a standalone grid slot.
+    ///
+    /// The precondition for `makeFolder(holding:)`: an app that is a folder
+    /// member (I2) or is not placed at all has no slot that could become a folder.
+    /// Read off `pages`, so it answers "is it in the grid", not "does it exist".
+    func isGridSlot(_ appID: String) -> Bool {
+        pages.contains { $0.contains(.app(appID)) }
     }
 
     /// Add an existing app to an existing folder.
@@ -426,11 +510,17 @@ final class DeckStore: ObservableObject {
         folders[folderID] = folder
         removeGridSlot(appID)
         normalizePages()
+        syncCustomOrder()
         save()
+        flashMerge(.absorbed, folder: folderID)
         return true
     }
 
-    /// Remove one app from a folder; an empty folder disappears.
+    /// Remove one app from a folder; a folder that has stopped being a folder
+    /// disappears — see `AppFolder.dissolves(memberCount:isExplicit:)`. A folder
+    /// the user created by hand is allowed to sit at one member; every other
+    /// one, and any folder at all left with nothing, is dissolved with its
+    /// survivor returned to the grid.
     func removeFromFolder(_ appID: String, folder folderID: UUID) {
         guard var folder = folders[folderID] else { return }
         folder.appIDs.removeAll { $0 == appID }
@@ -441,7 +531,8 @@ final class DeckStore: ObservableObject {
         // Drop any stray slot first. `removeGridSlot` touches only `pages`,
         // never `folders`, so it is safe at this point.
         removeGridSlot(appID)
-        if folder.appIDs.count <= 1 {
+        if AppFolder.dissolves(memberCount: folder.appIDs.count, isExplicit: folder.isUserCreated) {
+            flashMerge(.released, folder: folderID)
             let leftovers = folder.appIDs
             folders.removeValue(forKey: folderID)
             replaceInGrid(.folder(folderID), with: leftovers.first.map { DeckSlot.app($0) } ?? .app(""))
@@ -452,19 +543,96 @@ final class DeckStore: ObservableObject {
             appendToGrid(.app(appID))
         }
         normalizePages()
+        syncCustomOrder()
         save()
     }
 
-    /// Dissolve a folder, returning its apps to the grid.
+    /// Dissolve a folder, returning its members to the grid.
+    ///
+    /// Matches LaunchOS, whose own wording for it is explicit: "Ungrouped apps
+    /// are added to the end of their original page. If the page is full, they
+    /// continue onto the next page and may shift apps on later pages." The
+    /// members therefore join the end of the page the folder stood on — neither
+    /// the folder's own cell nor the end of the whole deck. A page that overflows
+    /// after the append spills onto the next one through `enforceCapacity`, which
+    /// is exactly the shift the original warns about.
     func ungroup(_ folderID: UUID) {
         guard let folder = folders[folderID] else { return }
+        flashMerge(.released, folder: folderID)
         folders.removeValue(forKey: folderID)
-        let members = folder.appIDs
-        replaceInGrid(.folder(folderID), with: members.first.map { DeckSlot.app($0) } ?? .app(""))
-        for extra in members.dropFirst() { appendToGrid(.app(extra)) }
-        pages = pages.map { $0.filter { $0 != .app("") } }
+
+        guard let origin = locate(.folder(folderID)) else {
+            // The tile is not on the grid (should not happen). Return the members
+            // anyway rather than losing them; there is no page to append to.
+            for member in folder.appIDs { appendToGrid(.app(member)) }
+            normalizePages()
+            syncCustomOrder()
+            save()
+            return
+        }
+
+        pages[origin.section].remove(at: origin.item)
+        for member in folder.appIDs {
+            pages[origin.section].append(.app(member))
+        }
+        enforceCapacity()
         normalizePages()
+        syncCustomOrder()
         save()
+    }
+
+    /// Dissolve **every** folder in one pass (LaunchOS "Ungroup All Folders").
+    ///
+    /// Folders dissolve in grid order (page 0 → last, left to right) so the
+    /// outcome is deterministic; each folder's members follow the single
+    /// `ungroup` placement rule (appended to the folder's own page, spilling
+    /// onto the next). A folder that is not on the grid (should not happen)
+    /// dissolves last, in UUID order, keeping the pass reproducible. The whole
+    /// pass runs inside one batch — a single save at the end, not one per
+    /// folder. With no folders this is a no-op and nothing is written.
+    func ungroupAllFolders() {
+        var onGrid: [UUID] = []
+        var seen = Set<UUID>()
+        for page in pages {
+            for slot in page {
+                if case .folder(let id) = slot, folders[id] != nil, !seen.contains(id) {
+                    seen.insert(id)
+                    onGrid.append(id)
+                }
+            }
+        }
+        let offGrid = folders.keys.filter { !seen.contains($0) }
+            .sorted { $0.uuidString < $1.uuidString }
+        let all = onGrid + offGrid
+        guard !all.isEmpty else { return }
+        beginBatch()
+        for id in all { ungroup(id) }
+        endBatch()
+    }
+
+    /// Reorganize the layout by the LaunchOS "Reorganize Layout" rules
+    /// (report 53). The rule set is applied by the pure `LayoutOrganizer`;
+    /// this is the one mutating site — one batch, one save, `customOrder`
+    /// re-derived exactly once at the end.
+    ///
+    /// Pages outside the scope keep their items; an empty scope (the
+    /// "Select at least one page" case) changes nothing and writes nothing.
+    func reorganize(with options: OrganizeOptions) {
+        let scope = options.scope(pageCount: pages.count)
+        guard !scope.isEmpty else { return }
+        let result = LayoutOrganizer.organize(pages: pages,
+                                              folders: folders,
+                                              apps: visibleApps,
+                                              capacity: metrics.capacity,
+                                              options: options,
+                                              scopePages: scope)
+        beginBatch()
+        pages = result.pages
+        folders = result.folders
+        enforceCapacity()
+        normalizePages()
+        syncCustomOrder()
+        endBatch()
     }
 
     /// Move the item at a page/index to another position.
@@ -485,11 +653,20 @@ final class DeckStore: ObservableObject {
 
     /// Pull an app out of a folder and place it at a specific grid position.
     /// Used when dragging an app out of an expanded folder onto the grid.
+    ///
+    /// Every precondition is checked *before* the first mutation. The old order
+    /// ran `removeFromFolder` — which saves — and only then guarded on `locate`,
+    /// so a failure there returned `false` with the layout already changed on
+    /// disk. A `false` here now means nothing happened.
     @discardableResult
     func moveOutOfFolder(_ appID: String, folder folderID: UUID, toPage page: Int, index: Int) -> Bool {
         guard let folder = folders[folderID], folder.appIDs.contains(appID) else { return false }
-        removeFromFolder(appID, folder: folderID)
+        // `removeFromFolder` re-finds the app with `locate` once it is back on
+        // the grid, so the only way that can fail is the folder tile itself not
+        // being on the grid — checked here, before anything moves.
+        guard locate(.folder(folderID)) != nil else { return false }
 
+        removeFromFolder(appID, folder: folderID)
         guard let slot = locate(.app(appID)) else { return false }
         let target = min(max(page, 0), max(pages.count - 1, 0))
         let limit = pages.indices.contains(target) ? pages[target].count : 0
@@ -639,9 +816,12 @@ final class DeckStore: ObservableObject {
 
     /// Detach `appID` from every folder that holds it, except `keep`.
     ///
-    /// Enforces **I1** at the point of mutation. A folder left with fewer than
-    /// two members is not a folder: it is dissolved and its survivor returned to
-    /// the grid, matching `reconcile`'s "a folder needs two members" rule.
+    /// Enforces **I1** at the point of mutation. What happens to a folder that
+    /// has just lost a member is decided in exactly one place,
+    /// `AppFolder.dissolves(memberCount:isExplicit:)`: below two members it is
+    /// not a folder, it is an app, and it is dissolved with its survivor
+    /// returned to the grid — matching `reconcile`'s rule. A folder the user
+    /// created by hand is the one exception and may sit at a single member.
     private func detachFromAnyFolder(_ appID: String, except keep: UUID? = nil) {
         let holders = folders
             .filter { $0.key != keep && $0.value.appIDs.contains(appID) }
@@ -649,7 +829,8 @@ final class DeckStore: ObservableObject {
         for fid in holders {
             guard var folder = folders[fid] else { continue }
             folder.appIDs.removeAll { $0 == appID }
-            if folder.appIDs.count <= 1 {
+            if AppFolder.dissolves(memberCount: folder.appIDs.count,
+                                   isExplicit: folder.isUserCreated) {
                 folders.removeValue(forKey: fid)
                 // A user's named folder silently vanishing is exactly the kind of
                 // automatic action the class contract (`Any automatic repair
@@ -699,6 +880,20 @@ final class DeckStore: ObservableObject {
         if pages.isEmpty { pages = [[]] }
     }
 
+    /// Re-derive `customOrder` from `pages`, expanding each folder slot into its
+    /// members at that slot's position.
+    ///
+    /// **Contract: every function that mutates `pages` or folder membership must
+    /// call this before `save()`.** `save()` persists `customOrder` as its own
+    /// field rather than deriving it, so a mutation that skips this leaves a
+    /// layout file whose `pages` and `customOrder` disagree. Nothing heals it on
+    /// load (`apply(_:)` reads the two independently), so the stale order is what
+    /// `sorted()` sees — and `restartToDefaultOrder` in Custom mode then reverts
+    /// to the arrangement from *before* the folder operation. `move` and
+    /// `fillEmptySlots` always synced; the four folder mutators
+    /// (`makeFolder`, `addToFolder`, `removeFromFolder`, `ungroup`) did not.
+    ///
+    /// No-op under any sort except `.manual`, which is the only one that reads it.
     private func syncCustomOrder() {
         guard sortKey == .manual else { return }
         // An app that is both a grid slot and a folder member would otherwise be
@@ -794,6 +989,10 @@ final class DeckStore: ObservableObject {
                         placed.insert(app.id)
                         ids.append(app.id)
                     }
+                    // Deliberately its own comparison rather than
+                    // `AppFolder.dissolves`: this path materialises an *external*
+                    // layout, which cannot carry the user's intent, so a one-item
+                    // folder is always flattened to an app below.
                     if ids.count >= 2 {
                         let folder = AppFolder(name: name, appIDs: ids)
                         newFolders[folder.id] = folder
@@ -1018,8 +1217,10 @@ final class DeckStore: ObservableObject {
         }
 
         // Folders: drop members that vanished / are hidden (normal pruning),
-        // drop duplicates *within* a folder (I3), then drop folders that no
-        // longer hold two apps.
+        // drop duplicates *within* a folder (I3), then ask
+        // `AppFolder.dissolves` whether what is left is still a folder. Asking
+        // the shared rule rather than comparing counts here is what stops a scan
+        // from dissolving a folder the user created by hand.
         var duplicateMemberRepairs = 0
         var dissolvedFolderRepairs = 0
         for (fid, folder) in folders {
@@ -1035,7 +1236,8 @@ final class DeckStore: ObservableObject {
                 }
             }
             updated.appIDs = kept
-            if updated.appIDs.count <= 1 {
+            if AppFolder.dissolves(memberCount: updated.appIDs.count,
+                                   isExplicit: updated.isUserCreated) {
                 folders.removeValue(forKey: fid)
                 dissolvedFolderRepairs += 1
             } else {
@@ -1148,8 +1350,10 @@ final class DeckStore: ObservableObject {
             folder.appIDs.removeAll { firstHolder[$0] != fid }
             guard folder.appIDs.count != before else { continue }
             repaired += before - folder.appIDs.count
-            if folder.appIDs.count <= 1 {
-                // A one-app folder is not a folder: dissolve it.
+            if AppFolder.dissolves(memberCount: folder.appIDs.count,
+                                   isExplicit: folder.isUserCreated) {
+                // No longer a folder — see `AppFolder.dissolves`. A folder the
+                // user created by hand survives at one member.
                 folders.removeValue(forKey: fid)
                 let survivor = folder.appIDs.first.map { DeckSlot.app($0) } ?? .app("")
                 replaceInGrid(.folder(fid), with: survivor)
@@ -1207,6 +1411,32 @@ final class DeckStore: ObservableObject {
     }
 
     /// Adopt a decoded layout into memory. Does not reconcile and does not save.
+    /// Replace the layout with a backup's payload (report 56 §3).
+    ///
+    /// **Validates before touching anything**: a payload that does not decode
+    /// as a layout file leaves the store, the file and the user's arrangement
+    /// exactly as they were — an import is the one operation that can throw a
+    /// layout away, so it is the one that must refuse rather than half-apply.
+    /// The write itself goes through the ordinary `save()`, so the rotation
+    /// that keeps `layout.json.bak` still happens.
+    @discardableResult
+    func adoptBackupPayload(_ data: Data) -> Bool {
+        guard let file = try? JSONDecoder().decode(LayoutFile.self, from: data),
+              !file.pages.isEmpty else { return false }
+        beginBatch()
+        apply(file)
+        reconcile()
+        endBatch()
+        return true
+    }
+
+    /// The layout file's bytes, for a backup export (report 56 §3).
+    ///
+    /// Reads the file rather than re-encoding the in-memory state, so what the
+    /// user exports is byte-for-byte what a relaunch would read — including any
+    /// field a future version adds.
+    func layoutFileData() -> Data? { try? Data(contentsOf: storeURL) }
+
     private func apply(_ file: LayoutFile) {
         hidden = Set(file.hidden)
         // Same trap risk as customOrder below: dedupe rather than trap.

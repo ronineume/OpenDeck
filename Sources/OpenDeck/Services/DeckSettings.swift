@@ -48,6 +48,34 @@ struct Preferences {
     func register(defaults: [String: Any]) { store.register(defaults: defaults) }
 }
 
+/// The activation policy that matches the user's Dock-icon choice.
+///
+/// `.accessory` removes the Dock icon; `.regular` restores it. The deck is a
+/// borderless overlay with no menu bar of its own, so dropping to `.accessory`
+/// costs nothing — `--bench` and `--snapshot` already run that way.
+enum DockIconPolicy {
+    static func policy(showDockIcon: Bool) -> NSApplication.ActivationPolicy {
+        showDockIcon ? .regular : .accessory
+    }
+
+    /// Makes sure at least one way out of the app stays on.
+    ///
+    /// OpenDeck is a borderless overlay with no menu bar of its own, and with no
+    /// window open Cmd-Q has nothing to reach. Turning off *both* the Dock icon
+    /// and the menu bar icon therefore leaves no way to quit from the UI at all:
+    /// not an inconvenience, a trap — and one the two toggles reach in two clicks,
+    /// because the menu bar icon is off by default.
+    ///
+    /// Only that impossible pair is touched. The Dock-icon choice is left exactly
+    /// as the user set it, and the menu bar icon is the one that comes back,
+    /// because it is the quieter of the two.
+    static func resolveIcons(showDockIcon: Bool,
+                             showMenuBarIcon: Bool) -> (dock: Bool, menuBar: Bool) {
+        if showDockIcon || showMenuBarIcon { return (showDockIcon, showMenuBarIcon) }
+        return (showDockIcon, true)
+    }
+}
+
 /// App-level preferences, persisted in UserDefaults.
 ///
 /// Layout (pages, folders, sort) lives in `DeckStore`; this holds everything
@@ -62,6 +90,9 @@ final class DeckSettings: ObservableObject {
         static let pinnedWallpaperPath = "pinnedWallpaperPath"
         static let glassMaterial = "glassMaterial"
         static let gridPreset = "gridPreset"
+        static let iconScale = "iconScale"
+        static let showDockIcon = "showDockIcon"
+        static let screenPolicy = "screenPolicy"
         static let hotKeyCode = "hotKeyCode"
         static let hotKeyModifiers = "hotKeyModifiers"
         static let hotKeyEnabled = "hotKeyEnabled"
@@ -69,6 +100,11 @@ final class DeckSettings: ObservableObject {
         static let launchpadKeyEnabled = "launchpadKeyEnabled"
         static let showHiddenInSearch = "showHiddenInSearch"
         static let showLabels = "showLabels"
+        static let holdOptionForUninstall = "holdOptionForUninstall"
+        /// LaunchOS `displayMode` (report 56 §5).
+        static let displayMode = "displayMode"
+        /// LaunchOS `browsingStyle` (report 56 §6).
+        static let browsingStyle = "browsingStyle"
         static let hotCorner = "hotCorner"
         static let hideDock = "hideDock"
         static let returnToHome = "returnToHome"
@@ -79,6 +115,20 @@ final class DeckSettings: ObservableObject {
         static let lastPageLeftAt = "lastPageLeftAt"
         static let startAtLogin = "startAtLogin"
         static let showMenuBarIcon = "showMenuBarIcon"
+        /// The Reorganize sheet's rule set (report 53). LaunchOS persists the
+        /// same five `Organize*` keys (`bin-strings.txt`: `OrganizePageScope`,
+        /// `OrganizeAppleAppPlacement`, `OrganizeFolderPlacement`,
+        /// `OrganizeSortMethod`, `OrganizeSortDirection`) so the sheet reopens
+        /// on the rules the user last used. The page *selection* is session
+        /// state — deliberately not persisted.
+        static let organizePageScope = "OrganizePageScope"
+        static let organizeAcrossPages = "OrganizeAcrossPages"
+        static let organizeAppleAppPlacement = "OrganizeAppleAppPlacement"
+        static let organizeFolderPlacement = "OrganizeFolderPlacement"
+        static let organizeSortMethod = "OrganizeSortMethod"
+        static let organizeSortDirection = "OrganizeSortDirection"
+        static let organizeAlsoSortInFolders = "OrganizeAlsoSortInFolders"
+        static let organizeUngroupAllFolders = "OrganizeUngroupAllFolders"
     }
 
     /// Named `defaults` on purpose: every existing call site reads exactly as it
@@ -138,6 +188,35 @@ final class DeckSettings: ObservableObject {
         didSet { defaults.set(gridPreset.rawValue, forKey: Key.gridPreset) }
     }
 
+    /// How much larger or smaller the user wants app icons than the derived size.
+    ///
+    /// Multiplies the display-derived icon size (see `IconScale`), which is why
+    /// the range is clamped rather than trusted. Read by the window controller
+    /// each time the deck is shown, so a change lands on the next open.
+    @Published var iconScale: Double {
+        didSet { defaults.set(iconScale, forKey: Key.iconScale) }
+    }
+
+    /// Whether the app keeps a Dock icon.
+    ///
+    /// On by default: an overlay with no Dock icon and no menu bar icon would be
+    /// impossible to quit from the UI. Applies immediately (`applyDockIcon`).
+    @Published var showDockIcon: Bool {
+        didSet {
+            defaults.set(showDockIcon, forKey: Key.showDockIcon)
+            applyDockIcon()
+        }
+    }
+
+    /// Which screen the deck opens on.
+    ///
+    /// Read every time the deck is shown (`LaunchpadWindowController.targetScreen`)
+    /// and deliberately not observed: unlike the hot key there is no registration
+    /// to redo, so a change simply lands on the next open.
+    @Published var screenPolicy: ScreenPolicy {
+        didSet { defaults.set(screenPolicy.rawValue, forKey: Key.screenPolicy) }
+    }
+
     @Published var hotKeySpec: HotKeySpec? {
         didSet {
             if let hotKeySpec {
@@ -163,6 +242,14 @@ final class DeckSettings: ObservableObject {
     /// Show app names under the icons.
     @Published var showLabels: Bool {
         didSet { defaults.set(showLabels, forKey: Key.showLabels) }
+    }
+
+    /// Hold Option and click an app to enter uninstall mode (report 56 §4).
+    ///
+    /// Off by default: it changes what a plain click does, and a user who
+    /// never asked for it must not lose app launches to a held Option.
+    @Published var holdOptionForUninstall: Bool {
+        didSet { defaults.set(holdOptionForUninstall, forKey: Key.holdOptionForUninstall) }
     }
 
     /// Screen corner that opens the deck.
@@ -208,6 +295,20 @@ final class DeckSettings: ObservableObject {
         didSet { defaults.set(hideDock, forKey: Key.hideDock) }
     }
 
+    /// Whether the deck covers the screen or sits in a window (report 56 §5).
+    ///
+    /// Read when the window is built, so a change lands the next time the deck
+    /// opens — the same contract `gridPreset` and `iconScale` keep.
+    @Published var displayMode: DisplayMode {
+        didSet { defaults.set(displayMode.rawValue, forKey: Key.displayMode) }
+    }
+
+    /// Whether the deck pages or scrolls (report 56 §6). Same contract as
+    /// `displayMode`: read when the deck is shown.
+    @Published var browsingStyle: BrowsingStyle {
+        didSet { defaults.set(browsingStyle.rawValue, forKey: Key.browsingStyle) }
+    }
+
     /// Whether a status item lives in the menu bar.
     ///
     /// Off by default: the app already owns a Dock icon, and an icon appearing in
@@ -221,6 +322,46 @@ final class DeckSettings: ObservableObject {
         didSet {
             defaults.set(startAtLogin, forKey: Key.startAtLogin)
             applyStartAtLogin()
+        }
+    }
+
+    /// The Reorganize sheet's rule set, persisted across launches (report 53).
+    ///
+    /// `selectedPages` is deliberately **not** part of this: it is a choice
+    /// about the current layout, and a stale selection would silently
+    /// reorganize pages the user no longer has.
+    var organizeOptions: OrganizeOptions {
+        get {
+            var o = OrganizeOptions()
+            o.pageScope = OrganizePageScope(
+                rawValue: defaults.string(forKey: Key.organizePageScope) ?? ""
+            ) ?? .allPages
+            o.acrossPages = defaults.object(forKey: Key.organizeAcrossPages) as? Bool ?? true
+            o.appleAppPlacement = AppleAppPlacement(
+                rawValue: defaults.string(forKey: Key.organizeAppleAppPlacement) ?? ""
+            ) ?? .afterOtherApps
+            o.folderPlacement = FolderPlacement(
+                rawValue: defaults.string(forKey: Key.organizeFolderPlacement) ?? ""
+            ) ?? .afterApps
+            o.sortMethod = SortKey(
+                rawValue: defaults.string(forKey: Key.organizeSortMethod) ?? ""
+            ) ?? .name
+            o.sortDirection = SortOrder(
+                rawValue: defaults.string(forKey: Key.organizeSortDirection) ?? ""
+            ) ?? .ascending
+            o.alsoSortInFolders = defaults.bool(forKey: Key.organizeAlsoSortInFolders)
+            o.ungroupAllFolders = defaults.bool(forKey: Key.organizeUngroupAllFolders)
+            return o
+        }
+        set {
+            defaults.set(newValue.pageScope.rawValue, forKey: Key.organizePageScope)
+            defaults.set(newValue.acrossPages, forKey: Key.organizeAcrossPages)
+            defaults.set(newValue.appleAppPlacement.rawValue, forKey: Key.organizeAppleAppPlacement)
+            defaults.set(newValue.folderPlacement.rawValue, forKey: Key.organizeFolderPlacement)
+            defaults.set(newValue.sortMethod.rawValue, forKey: Key.organizeSortMethod)
+            defaults.set(newValue.sortDirection.rawValue, forKey: Key.organizeSortDirection)
+            defaults.set(newValue.alsoSortInFolders, forKey: Key.organizeAlsoSortInFolders)
+            defaults.set(newValue.ungroupAllFolders, forKey: Key.organizeUngroupAllFolders)
         }
     }
 
@@ -260,6 +401,9 @@ final class DeckSettings: ObservableObject {
             Key.blurRadius: 26.0,
             Key.glassMaterial: GlassMaterial.regular.rawValue,
             Key.gridPreset: GridPreset.macOSDefault.rawValue,
+            Key.iconScale: 1.0,
+            Key.showDockIcon: true,
+            Key.screenPolicy: ScreenPolicy.pointer.rawValue,
             Key.hotKeyEnabled: true,
             Key.hotKeyCode: Int(HotKeySpec.optionSpace.keyCode),
             Key.hotKeyModifiers: Int(HotKeySpec.optionSpace.modifiers),
@@ -267,6 +411,9 @@ final class DeckSettings: ObservableObject {
             Key.launchpadKeyEnabled: false,
             Key.showHiddenInSearch: false,
             Key.showLabels: true,
+            Key.holdOptionForUninstall: false,
+            Key.displayMode: DisplayMode.fullScreen.rawValue,
+            Key.browsingStyle: BrowsingStyle.paged.rawValue,
             Key.hotCorner: HotCorner.off.rawValue,
             Key.hideDock: false,
             // `returnToHome` is deliberately NOT registered here: a registered
@@ -288,10 +435,19 @@ final class DeckSettings: ObservableObject {
         pinnedWallpaperPath = defaults.string(forKey: Key.pinnedWallpaperPath)
         glassMaterial = GlassMaterial(rawValue: defaults.string(forKey: Key.glassMaterial) ?? "") ?? .regular
         gridPreset = GridPreset(rawValue: defaults.string(forKey: Key.gridPreset) ?? "") ?? .macOSDefault
+        // Both are registered above, so an install that predates them keeps the
+        // old behaviour (unscaled icons, Dock icon shown) rather than reading a
+        // zero out of an absent key.
+        iconScale = defaults.double(forKey: Key.iconScale)
+        showDockIcon = defaults.bool(forKey: Key.showDockIcon)
+        screenPolicy = ScreenPolicy(rawValue: defaults.string(forKey: Key.screenPolicy) ?? "") ?? .pointer
         pinchEnabled = defaults.bool(forKey: Key.pinchEnabled)
         launchpadKeyEnabled = defaults.bool(forKey: Key.launchpadKeyEnabled)
         showHiddenInSearch = defaults.bool(forKey: Key.showHiddenInSearch)
         showLabels = defaults.bool(forKey: Key.showLabels)
+        holdOptionForUninstall = defaults.bool(forKey: Key.holdOptionForUninstall)
+        displayMode = DisplayMode(rawValue: defaults.string(forKey: Key.displayMode) ?? "") ?? .fullScreen
+        browsingStyle = BrowsingStyle(rawValue: defaults.string(forKey: Key.browsingStyle) ?? "") ?? .paged
         hotCorner = HotCorner(rawValue: defaults.string(forKey: Key.hotCorner) ?? "") ?? .off
         hideDock = defaults.bool(forKey: Key.hideDock)
         // `returnToHome` wins whenever it has been written; the old boolean is the
@@ -310,6 +466,19 @@ final class DeckSettings: ObservableObject {
         } else {
             hotKeySpec = nil
         }
+    }
+
+    /// Puts the Dock icon in the state the user chose.
+    ///
+    /// Like `applyStartAtLogin`, this is a real change to the user's system, so a
+    /// headless run must not make it — and must say so by returning `false`
+    /// rather than pretending to have done it. Same contract as
+    /// `MenuBarController.apply`.
+    @discardableResult
+    func applyDockIcon() -> Bool {
+        guard mayPersist else { return false }
+        NSApp.setActivationPolicy(DockIconPolicy.policy(showDockIcon: showDockIcon))
+        return true
     }
 
     private func applyStartAtLogin() {
